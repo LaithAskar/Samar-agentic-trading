@@ -1,0 +1,6 @@
+---
+description: Engine purity
+globs: packages/engine/**/*.py
+---
+
+The engine takes bars in and returns fills. It does not read the clock, the network, or the environment.

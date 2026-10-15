@@ -1,0 +1,6 @@
+---
+description: Web tokens
+globs: apps/web/**/*.tsx
+---
+
+Colors come from globals.css variables. Numbers use the mono font. Do not add an order form.

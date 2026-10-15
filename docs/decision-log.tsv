@@ -1,0 +1,20 @@
+ts	phase	decision	why	evidence	result
+2026-10-14T05:00:00Z	m0	sqlite plus SQL RLS contract	no local supabase	docs/decisions.md	kept
+2026-10-14T05:00:00Z	m0	no public_live module	user forbade any order path	scripts/check_no_orders.py	kept
+2026-10-14T05:10:00Z	m1	default slippage 5 bps	meridian fill contract	test_default_slippage_is_five_bps	kept
+2026-10-14T05:20:00Z	m2	lock fixture golden not README	yahoo history drifted 2026-10-14	test_market AAPL 111.63	kept
+2026-10-14T05:30:00Z	m4	frozen CSV plus urllib chart adapter	engine stays pure	check_engine_purity.py	kept
+2026-10-14T05:40:00Z	m10	scripted model after shape-only key	no provider key in this run	test_api assistant	kept
+2026-10-14T05:50:00Z	m0	gitleaks allowlists bytecode caches	pyc held concatenated test keys	make verify gitleaks	kept
+2026-10-14T05:50:00Z	m0	bind API on all interfaces	preview needs 0.0.0.0	ruff per-file S104 ignore	kept
+2026-10-14T06:10:00Z	m9	mark paper positions at the last close	fill price made equity disagree with the backtest	test_paper_eval_is_idempotent last_price 10.0 equity 99955.0	kept
+2026-10-14T06:10:00Z	m7	ignore a stale fetch after unmount	strict mode painted Failed to fetch over a loaded account	apps/web/src/lib/api.ts watch	kept
+2026-10-14T06:10:00Z	m7	dark tokens only	the requested UI is dark and the browser preferred light	globals.css has no light override	kept
+2026-10-14T06:30:00Z	auth	local bearer session, supabase when env is set	X-User-Id was a shared demo	test_user_isolation and test_supabase_bearer_isolates_users	kept
+2026-10-14T06:30:00Z	m10	real provider HTTP when a key exists	scripted drafts stayed on after a key was saved	test_anthropic_step_parses_a_proposal_json	kept
+2026-10-14T06:30:00Z	m10	scripted model when no key is saved	the approval gate still has to run offline	test_no_key_uses_the_scripted_model_and_still_waits_for_approval	kept
+2026-10-14T06:30:00Z	m12	settings sync calls PublicReadOnly	holdings should show on the dashboard	test_sync_portfolio_is_read_only_and_scoped equity 1200.5	kept
+2026-10-14T15:50:00Z	m10	openai and nous chat completions	portal openapi server is inference-api.nousresearch.com/v1	test_nous_step_posts_portal_chat_completions	kept
+2026-10-14T15:50:00Z	m10	saved choice picks the provider	several model keys need an explicit selection	test_openai_choice_posts_chat_completions	kept
+2026-10-14T16:30:00Z	sec	refuse the public development KEK outside dev	an unset key must not encrypt a production database	test_production_refuses_a_missing_kek	kept
+2026-10-15T04:30:00Z	arena	rank by held-out deflated Sharpe	train performance overfits the search window	test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent	kept

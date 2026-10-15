@@ -1,0 +1,176 @@
+[project]
+name = "samar"
+version = "0.1.0"
+description = "Samar paper-trading learning app"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+  "packages/engine",
+  "packages/data",
+  "packages/secrets",
+  "packages/brokers",
+  "packages/agent",
+  "packages/contracts",
+  "apps/api",
+  "apps/worker",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-socket>=0.7.0",
+  "ruff>=0.8",
+  "pyright>=1.1.390",
+  "import-linter>=2.1",
+  "httpx>=0.28",
+  "cryptography>=44.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["packages", "apps"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "ANN", "B", "S", "PL", "TID", "UP"]
+ignore = ["PLR2004", "PLR0911", "PLR0913", "PLR0915"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "ANN", "PLR2004", "S105", "S106"]
+"packages/data/src/samar_data/market.py" = ["S310"]
+"packages/secrets/**" = ["S105"]
+"apps/api/src/samar_api/__main__.py" = ["S104"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"yfinance".msg = "Market data imports belong in packages/data only."
+"requests".msg = "Use httpx at the API boundary. The engine stays pure."
+
+[tool.pyright]
+typeCheckingMode = "strict"
+include = [
+  "packages/engine/src",
+  "packages/data/src",
+  "packages/secrets/src",
+  "packages/brokers/src",
+  "packages/agent/src",
+  "packages/contracts/src",
+  "apps/api/src",
+  "apps/worker/src",
+]
+exclude = ["**/tests/**", "**/node_modules/**", "**/.venv/**"]
+venvPath = "."
+venv = ".venv"
+extraPaths = [
+  "packages/engine/src",
+  "packages/data/src",
+  "packages/secrets/src",
+  "packages/brokers/src",
+  "packages/agent/src",
+  "packages/contracts/src",
+  "apps/api/src",
+  "apps/worker/src",
+]
+reportMissingTypeStubs = false
+
+[[tool.pyright.executionEnvironments]]
+root = "packages/data"
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "packages/brokers"
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "packages/agent"
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "apps/api"
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+
+[tool.importlinter]
+include_external_packages = true
+root_packages = [
+  "samar_engine",
+  "samar_data",
+  "samar_secrets",
+  "samar_brokers",
+  "samar_agent",
+  "samar_contracts",
+  "samar_api",
+  "samar_worker",
+]
+
+[[tool.importlinter.contracts]]
+name = "engine stays pure"
+type = "forbidden"
+source_modules = ["samar_engine"]
+forbidden_modules = [
+  "samar_data",
+  "samar_agent",
+  "samar_api",
+  "samar_worker",
+  "samar_brokers",
+  "yfinance",
+  "requests",
+  "httpx",
+]
+
+[[tool.importlinter.contracts]]
+name = "api does not import the worker"
+type = "forbidden"
+source_modules = ["samar_api"]
+forbidden_modules = ["samar_worker"]
+
+[[tool.importlinter.contracts]]
+name = "agent does not place brokerage orders"
+type = "forbidden"
+source_modules = ["samar_agent", "samar_worker"]
+forbidden_modules = ["samar_brokers.public_live"]
+
+[[tool.importlinter.contracts]]
+name = "only secrets imports cryptography"
+type = "forbidden"
+source_modules = [
+  "samar_engine",
+  "samar_data",
+  "samar_brokers",
+  "samar_agent",
+  "samar_api",
+  "samar_worker",
+  "samar_contracts",
+]
+forbidden_modules = ["cryptography"]
+allow_indirect_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+markers = ["enable_socket: allow sockets for in-process ASGI tests"]
+testpaths = [
+  "packages/engine/tests",
+  "packages/data/tests",
+  "packages/secrets/tests",
+  "packages/brokers/tests",
+  "packages/agent/tests",
+  "apps/api/tests",
+]
+pythonpath = [
+  "packages/engine/src",
+  "packages/data/src",
+  "packages/secrets/src",
+  "packages/brokers/src",
+  "packages/agent/src",
+  "packages/contracts/src",
+  "apps/api/src",
+  "apps/worker/src",
+]

@@ -1,0 +1,13 @@
+{
+  "name": "samar",
+  "private": true,
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "unrs-resolver"]
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "contracts:check": "uv run python scripts/contracts_check.py"
+  }
+}

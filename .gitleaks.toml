@@ -1,0 +1,19 @@
+title = "samar"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "samar-ai-key"
+description = "Anthropic or OpenRouter key prefix"
+regex = '''sk-(?:ant|or)-[A-Za-z0-9_\-]{12,}'''
+keywords = ["sk-"]
+
+[allowlist]
+paths = [
+  '''(^|/)\.venv(/|$)''',
+  '''(^|/)node_modules(/|$)''',
+  '''(^|/)__pycache__(/|$)''',
+  '''(^|/)\.next(/|$)''',
+  '''\.pyc$''',
+]
