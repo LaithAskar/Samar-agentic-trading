@@ -144,7 +144,12 @@ def _dollars(intent: OrderIntent, ctx: GuardContext) -> GuardResult | None:
     notional = intent.quantity * intent.limit_price
     if notional > ctx.limits.max_order_dollars:
         return GuardResult(ok=False, reason="order exceeds the per-order cap", halt=False)
-    if notional > ctx.limits.capital_cap:
+    held_value = 0.0
+    for position in ctx.positions:
+        if position.market_value is None:
+            return GuardResult(ok=False, reason="position value is unknown", halt=False)
+        held_value += position.market_value
+    if held_value + ctx.open_buys + notional > ctx.limits.capital_cap:
         return GuardResult(ok=False, reason="order exceeds the capital cap", halt=False)
     settled = ctx.buying_power if ctx.settled_cash is None else ctx.settled_cash
     if notional > settled and settled < ctx.buying_power:

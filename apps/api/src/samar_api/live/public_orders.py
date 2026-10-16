@@ -226,7 +226,31 @@ def _position(row: dict[str, object]) -> Held:
     elif isinstance(row.get("symbol"), str):
         raw = row.get("symbol")
         symbol = raw if isinstance(raw, str) else ""
-    return Held(symbol=symbol, quantity=_float(row.get("quantity")), instrument_type=kind)
+    quantity = _float(row.get("quantity"))
+    return Held(symbol=symbol, quantity=quantity, instrument_type=kind, market_value=_market_value(row, quantity))
+
+
+def _market_value(row: dict[str, object], quantity: float) -> float | None:
+    """None when the broker gives no parseable value, so the capital cap refuses instead of counting zero."""
+    current = _number(row.get("currentValue"))
+    if current is not None:
+        return current
+    last = row.get("lastPrice")
+    price = _number(_object(last).get("lastPrice")) if isinstance(last, dict) else None
+    return None if price is None else quantity * price
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _object(value: object) -> dict[str, object]:

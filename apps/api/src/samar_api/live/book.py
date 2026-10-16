@@ -506,6 +506,7 @@ class LiveBook:
             orders_today=self._orders_today(user_id, now),
             orders_last_minute=self._orders_last_minute(user_id, model, now),
             settled_cash=settled,
+            open_buys=self._open_buys(user_id, now),
             now=now,
             allowlist=ALLOWLIST,
         )
@@ -546,6 +547,17 @@ class LiveBook:
             (user_id, model, start, now.isoformat()),
         ).fetchone()
         return int(row["n"]) if row is not None else 0
+
+    def _open_buys(self, user_id: str, now: datetime) -> float:
+        """Buy orders still working today. Orders are DAY orders, so earlier ones have expired or filled."""
+        local = now.astimezone(NY)
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(qty * limit_price), 0) AS total FROM live_orders
+            WHERE user_id = ? AND side = 'BUY' AND status IN ('submitted', 'open') AND created_at >= ?""",
+            (user_id, start.isoformat()),
+        ).fetchone()
+        return float(row["total"]) if row is not None else 0.0
 
     def _unsettled_sells(self, user_id: str, now: datetime) -> float:
         rows = self.conn.execute(

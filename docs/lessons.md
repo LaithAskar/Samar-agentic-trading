@@ -7,3 +7,4 @@
 | An agent draft is not a write. | `test_unapproved_proposal_does_not_write_a_strategy` |
 | A brokerage order method stays inside `apps/api/src/samar_api/live/`. | `scripts/check_no_orders.py` |
 | A response model must not grow a secret field. | `test_secret_status_schema_has_no_secret_field` |
+| The capital cap is total buy exposure, not one order. | `test_capital_cap_totals_exposure_across_buys` |

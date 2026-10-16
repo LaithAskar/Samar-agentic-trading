@@ -629,3 +629,48 @@ def test_live_routes_require_the_phrases() -> None:
     assert "DELETE FROM live_audit" not in open("apps/api/src/samar_api/live/book.py", encoding="utf-8").read()
     _ = uuid.UUID(ORDER_ID)
     _ = Held(symbol="AAPL", quantity=1)
+
+
+def test_capital_cap_totals_exposure_across_buys() -> None:
+    script = Script()
+    script.buying_power = "2000.00"
+    script.equity = "2000.00"
+    _client, _state, user_id, book = _session(script)
+    _arm(book, user_id)
+    book.set_limits(user_id, Limits(capital_cap=200, max_order_dollars=200, max_orders_per_day=None), OPEN)
+    symbols = ["AAPL", "F", "T", "KO", "PFE", "INTC"]
+    for index, symbol in enumerate(symbols):
+        intent = OrderIntent(symbol=symbol, side="BUY", quantity=9, limit_price=20, reason="fill", model=f"m{index}")
+        book.run_cycle(user_id, OPEN + timedelta(seconds=70 * index), lambda intent=intent: intent)
+    bodies = [json.loads(body) for body in script.places]
+    spent = sum(int(body["quantity"]) * float(body["limitPrice"]) for body in bodies)
+    assert spent <= 200
+    assert len(bodies) == 1
+    assert any(row.detail == "order exceeds the capital cap" for row in book.audit(user_id))
+
+
+def test_held_positions_count_against_the_capital_cap() -> None:
+    script = Script()
+    script.positions = [{"instrument": {"symbol": "AAPL", "type": "EQUITY"}, "quantity": "5", "currentValue": "150.00"}]
+    _client, _state, user_id, book = _session(script)
+    _arm(book, user_id)
+    over = OrderIntent(symbol="F", side="BUY", quantity=3, limit_price=20, reason="over", model="script")
+    assert book.run_cycle(user_id, OPEN, lambda: over) == 0
+    assert script.places == []
+    under = OrderIntent(symbol="F", side="BUY", quantity=2, limit_price=20, reason="under", model="script")
+    assert book.run_cycle(user_id, OPEN + timedelta(minutes=1), lambda: under) == 1
+    script.positions = [{"instrument": {"symbol": "AAPL", "type": "EQUITY"}, "quantity": "5", "currentValue": "n/a"}]
+    small = OrderIntent(symbol="T", side="BUY", quantity=1, limit_price=1, reason="small", model="script")
+    assert book.run_cycle(user_id, OPEN + timedelta(minutes=2), lambda: small) == 0
+    assert any(row.detail == "position value is unknown" for row in book.audit(user_id))
+    capital = Limits(capital_cap=200, max_order_dollars=200)
+    ctx = _ok_ctx().model_copy(update={"limits": capital, "buying_power": 1000})
+    held = (Held(symbol="AAPL", quantity=5, market_value=150),)
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": held})).ok is True
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": held, "open_buys": 40})).reason == (
+        "order exceeds the capital cap"
+    )
+    unknown = (Held(symbol="AAPL", quantity=5),)
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": unknown})).reason == "position value is unknown"
+    sell = _ok_intent().model_copy(update={"side": "SELL", "quantity": 5})
+    assert evaluate(sell, ctx.model_copy(update={"positions": unknown, "open_buys": 500})).ok is True
