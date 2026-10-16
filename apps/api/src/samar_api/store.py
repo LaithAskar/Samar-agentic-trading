@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS backtests (
   benchmark_json TEXT,
   trades_json TEXT,
   error TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  data_label TEXT NOT NULL DEFAULT 'SYNTHETIC DATA'
 );
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
@@ -118,7 +119,12 @@ CREATE TABLE IF NOT EXISTS arena_runs (
   token_cap INTEGER NOT NULL,
   contestants_json TEXT NOT NULL,
   error TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  train_start TEXT NOT NULL DEFAULT '',
+  train_end TEXT NOT NULL DEFAULT '',
+  test_start TEXT NOT NULL DEFAULT '',
+  test_end TEXT NOT NULL DEFAULT '',
+  data_label TEXT NOT NULL DEFAULT 'SYNTHETIC DATA'
 );
 CREATE TABLE IF NOT EXISTS live_settings (
   user_id TEXT PRIMARY KEY,
@@ -211,7 +217,60 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     _migrate_live_settings(conn)
+    _migrate_result_labels(conn)
     return conn
+
+
+def _migrate_result_labels(conn: sqlite3.Connection) -> None:
+    _add_column(
+        conn,
+        "backtests",
+        "data_label",
+        "ALTER TABLE backtests ADD COLUMN data_label TEXT NOT NULL DEFAULT 'SYNTHETIC DATA'",
+    )
+    _add_column(
+        conn,
+        "arena_runs",
+        "train_start",
+        "ALTER TABLE arena_runs ADD COLUMN train_start TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column(
+        conn,
+        "arena_runs",
+        "train_end",
+        "ALTER TABLE arena_runs ADD COLUMN train_end TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column(
+        conn,
+        "arena_runs",
+        "test_start",
+        "ALTER TABLE arena_runs ADD COLUMN test_start TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column(
+        conn,
+        "arena_runs",
+        "test_end",
+        "ALTER TABLE arena_runs ADD COLUMN test_end TEXT NOT NULL DEFAULT ''",
+    )
+    _add_column(
+        conn,
+        "arena_runs",
+        "data_label",
+        "ALTER TABLE arena_runs ADD COLUMN data_label TEXT NOT NULL DEFAULT 'SYNTHETIC DATA'",
+    )
+    conn.commit()
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, statement: str) -> None:
+    if table == "backtests":
+        rows = conn.execute("PRAGMA table_info(backtests)")
+    elif table == "arena_runs":
+        rows = conn.execute("PRAGMA table_info(arena_runs)")
+    else:
+        raise ValueError(table)
+    names = {str(row["name"]) for row in rows}
+    if column not in names:
+        conn.execute(statement)
 
 
 def _migrate_live_settings(conn: sqlite3.Connection) -> None:

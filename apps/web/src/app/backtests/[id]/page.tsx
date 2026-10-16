@@ -44,8 +44,18 @@ export default function BacktestResultPage() {
   if (error) {
     return <p className="text-sm text-loss">{error}</p>;
   }
-  if (!row || !row.metrics || !row.skepticism) {
+  if (!row) {
     return <div className="h-40 animate-pulse rounded-md bg-surface" />;
+  }
+  if (!row.metrics || !row.skepticism) {
+    return (
+      <div className="space-y-3">
+        <h1 className="text-[28px] font-medium">Backtest</h1>
+        <p className="text-sm font-medium">{row.data_label}</p>
+        <p className="text-sm text-muted">Status {row.status}.</p>
+        {row.error ? <p className="text-sm text-loss">{row.error}</p> : null}
+      </div>
+    );
   }
   const metrics = row.metrics;
   const skepticism = row.skepticism;
@@ -53,6 +63,7 @@ export default function BacktestResultPage() {
     <div className="space-y-6">
       <header>
         <h1 className="text-[28px] font-medium">Backtest</h1>
+        <p className="text-sm font-medium">{row.data_label}</p>
         <p className="text-sm text-muted">Next-bar open fills. 5 bps slippage. Marked at the close.</p>
       </header>
       <EquityChart equity={row.equity} benchmark={row.benchmark_equity} />

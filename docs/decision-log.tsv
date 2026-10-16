@@ -21,3 +21,4 @@ ts	phase	decision	why	evidence	result
 2026-10-15T18:40:00Z	live	orders only behind evaluate	a class-time auto mode still has to refuse the same limits	test_each_limit_rejects_with_its_reason	kept
 2026-10-15T23:20:00Z	live	unlimited daily orders still settle T+1	a cash sale cannot fund a same-day rebuy	test_unsettled_sale_cannot_fund_a_rebuy	kept
 2026-10-16T02:50:00Z	data	track packages/data and ship a seeded series	a bare data/ ignore hid the workspace member, and Yahoo bars cannot be redistributed	test_fixture_slice_is_frozen	kept
+2026-10-16T03:10:00Z	data	personal Public bars stay in data/market	Yahoo forbids a scripted download and the committed series is synthetic	test_fetch_writes_a_gitignored_cache_from_mocked_http	kept

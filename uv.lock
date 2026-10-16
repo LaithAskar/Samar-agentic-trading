@@ -843,11 +843,15 @@ name = "samar-data"
 version = "0.1.0"
 source = { editable = "packages/data" }
 dependencies = [
+    { name = "httpx" },
     { name = "samar-engine" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "samar-engine", editable = "packages/engine" }]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "samar-engine", editable = "packages/engine" },
+]
 
 [[package]]
 name = "samar-engine"

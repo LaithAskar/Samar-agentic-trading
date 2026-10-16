@@ -3,8 +3,7 @@
 export PATH := $(HOME)/.local/bin:$(PATH)
 
 verify:
-	gitleaks detect --no-banner --source . --no-git --config .gitleaks.toml
-	sh scripts/test_gitleaks.sh
+	sh scripts/gitleaks_local.sh
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run pyright

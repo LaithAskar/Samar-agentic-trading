@@ -6,6 +6,8 @@ import { EquityChart } from "@/components/equity-chart";
 import { api } from "@/lib/api";
 import type { ArenaRunView } from "@/lib/contracts";
 
+const tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "SPY", "QQQ"] as const;
+
 const choices = [
   { provider: "random", title: "Random search", model: "random-search" },
   { provider: "anthropic", title: "Anthropic", model: "claude-haiku-4-5" },
@@ -15,6 +17,7 @@ const choices = [
 ] as const;
 
 export default function ArenaPage() {
+  const [ticker, setTicker] = useState<(typeof tickers)[number]>("AAPL");
   const [picked, setPicked] = useState<Record<string, boolean>>({ random: true });
   const [models, setModels] = useState<Record<string, string>>({});
   const [run, setRun] = useState<ArenaRunView | null>(null);
@@ -41,7 +44,7 @@ export default function ArenaPage() {
         .map((choice) => ({ provider: choice.provider, model: models[choice.provider] || choice.model }));
       const created = await api<ArenaRunView>("/arena/runs", {
         method: "POST",
-        body: JSON.stringify({ contestants, budget_proposals: 3, token_cap: 8000 }),
+        body: JSON.stringify({ contestants, budget_proposals: 3, token_cap: 8000, ticker }),
       });
       if (created.status === "queued") {
         await api("/jobs/run-once", { method: "POST" });
@@ -58,14 +61,28 @@ export default function ArenaPage() {
     <div className="space-y-4">
       <h1 className="text-[28px] font-medium">Arena</h1>
       <p className="max-w-xl text-sm text-muted">
-        Each contestant gets the same frozen AAPL file, the same train window, and the same number of proposals.
+        Each contestant gets the same bars, the same train window, and the same number of proposals.
         Rank uses the held-out window after a haircut for how many trials were tried. Train Sharpe is not the rank.
+        REAL DATA is a personal Public.com download in data/market. SYNTHETIC DATA is the committed random walk.
         These are historical backtests on a small sample. A higher rank is not a prediction. Not investment advice.
         Paper only. Public.com stays read-only.
       </p>
       {error ? <p className="text-sm text-loss">{error}</p> : null}
       <section className="rounded-md border border-line bg-surface p-4">
-        <h2 className="text-sm font-medium">Contestants</h2>
+        <h2 className="text-sm font-medium">Ticker</h2>
+        <select
+          value={ticker}
+          onChange={(event) => setTicker(event.target.value as (typeof tickers)[number])}
+          aria-label="Arena ticker"
+          className="mt-3 w-full rounded-md border border-line bg-bg px-3 py-2 text-sm"
+        >
+          {tickers.map((symbol) => (
+            <option key={symbol} value={symbol}>
+              {symbol}
+            </option>
+          ))}
+        </select>
+        <h2 className="mt-4 text-sm font-medium">Contestants</h2>
         <ul className="mt-3 space-y-3">
           {choices.map((choice) => (
             <li key={choice.provider} className="grid gap-2 md:grid-cols-[12rem_1fr] md:items-center">
@@ -98,9 +115,10 @@ export default function ArenaPage() {
       </section>
       {run ? (
         <section className="space-y-4">
+          <p className="text-sm font-medium">{run.data_label}</p>
           <p className="text-sm text-muted">
-            Train {run.train_start} to {run.train_end}. Held-out {run.test_start} to {run.test_end}. Budget{" "}
-            {run.budget_proposals} proposals. Status {run.status}.
+            {run.ticker}. Train {run.train_start} to {run.train_end}. Held-out {run.test_start} to {run.test_end}.
+            Budget {run.budget_proposals} proposals. Status {run.status}.
           </p>
           <div className="overflow-x-auto rounded-md border border-line">
             <table className="w-full text-left text-sm">

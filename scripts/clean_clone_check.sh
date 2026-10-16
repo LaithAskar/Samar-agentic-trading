@@ -19,5 +19,13 @@ test -f packages/data/src/samar_data/market.py
 test -f packages/data/src/samar_data/fixtures/AAPL.csv
 test -f packages/data/src/samar_data/fixtures/SPY.csv
 uv sync --all-packages --group dev
-pnpm install --frozen-lockfile
+# The pinned manager is pnpm 11.4.0. pnpm 10 ignores allowBuilds and hides this failure.
+if ! command -v corepack >/dev/null 2>&1; then
+  echo "corepack is required to install pnpm 11.4.0. It ships with Node.js 22." >&2
+  exit 1
+fi
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+corepack prepare pnpm@11.4.0 --activate
+corepack pnpm --version
+corepack pnpm install --frozen-lockfile
 make verify

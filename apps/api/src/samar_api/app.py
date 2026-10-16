@@ -73,6 +73,7 @@ class ArenaBody(BaseModel):
     contestants: list[ArenaContestantBody]
     budget_proposals: int = 4
     token_cap: int = 8000
+    ticker: str = "AAPL"
 
 
 class PhraseBody(BaseModel):
@@ -236,6 +237,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
                 contestants,
                 body.budget_proposals,
                 body.token_cap,
+                body.ticker,
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

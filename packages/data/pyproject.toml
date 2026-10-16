@@ -2,7 +2,7 @@
 name = "samar-data"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["samar-engine"]
+dependencies = ["samar-engine", "httpx>=0.28"]
 
 [tool.uv.sources]
 samar-engine = { workspace = true }

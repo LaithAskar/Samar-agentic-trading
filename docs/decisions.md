@@ -28,9 +28,9 @@ Yahoo Finance says not to redistribute information it provides. The files under 
 
 The chart overlays SPY. The warning panel compares the strategy with buy-and-hold of the same ticker. That is the comparison the README treats as the lesson.
 
-## Yahoo chart HTTP instead of the yfinance package
+## Personal Public.com cache, not a Yahoo download
 
-The adapter lives in `packages/data` and hits the chart endpoint yfinance uses. The engine does not import it. Unit tests read the CSV fixture. `pytest` blocks sockets except the in-process API tests.
+Yahoo Finance forbids automated collection without prior permission and forbids redistribution, so the app does not call the Yahoo chart endpoint. Alpha Vantage's free key is 100 daily points. Stooq has been refusing scripted downloads. `python -m samar_data.fetch` uses the person's Public.com secret, writes TEN_YEARS daily regular-session bars under `data/market/`, and git ignores that directory. Public's schema has no separate adjusted close. The engine stays free of HTTP. Arena and backtests read the cache when every series they need is there, and otherwise the seeded fixture. The label is REAL DATA only in the first case.
 
 ## Demo key check is a shape check
 

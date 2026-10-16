@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 
-from samar_engine.arena import RankRow, best_train_index, deflated_sharpe, random_specs, rank_labels
+import pytest
+from samar_engine.arena import RankRow, best_train_index, deflated_sharpe, random_specs, rank_labels, split_history
+from samar_engine.core.events import Bar
 
 
 def test_one_trial_has_no_haircut() -> None:
@@ -57,3 +60,35 @@ def test_random_search_seed_is_sma_20_then_sma_10() -> None:
 def test_best_train_index_skips_failures() -> None:
     assert best_train_index([None, 0.1, 0.4, 0.2]) == 2
     assert best_train_index([None, None]) is None
+
+
+def _day_bars(count: int) -> list[Bar]:
+    start = datetime(2020, 1, 1)
+    return [
+        Bar(
+            symbol="AAPL",
+            timestamp=start + timedelta(days=index),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0,
+            volume=1_000.0,
+        )
+        for index in range(count)
+    ]
+
+
+def test_split_history_uses_the_first_sixty_percent_as_train() -> None:
+    split = split_history(_day_bars(100))
+    assert split.train[0].timestamp.date().isoformat() == "2020-01-01"
+    assert split.train[-1].timestamp.date().isoformat() == "2020-02-29"
+    assert split.test[0].timestamp.date().isoformat() == "2020-03-01"
+    assert split.test[-1].timestamp.date().isoformat() == "2020-04-09"
+    assert len(split.folds[0]) == 20
+    assert len(split.folds[1]) == 20
+    assert split.folds[1][0].timestamp.date().isoformat() == "2020-03-21"
+
+
+def test_split_history_rejects_a_short_series() -> None:
+    with pytest.raises(ValueError, match="at least 80"):
+        split_history(_day_bars(79))

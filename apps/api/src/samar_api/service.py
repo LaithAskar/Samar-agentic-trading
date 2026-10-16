@@ -36,7 +36,7 @@ from samar_contracts.models import (
     StrategyView,
     TradeView,
 )
-from samar_data.market import FixtureMarketData, MarketData
+from samar_data.market import ARENA_TICKERS, FULL_END, FULL_START, MarketData, PreferLocalMarketData
 from samar_engine.backtest.engine import BacktestEngine
 from samar_engine.backtest.metrics import compute_metrics, daily_returns
 from samar_engine.backtest.rigor import buy_and_hold, sharpe_significance
@@ -50,7 +50,7 @@ from samar_engine.dsl import (
 from samar_engine.skepticism import build_skepticism
 from samar_secrets.vault import SealedSecret, associated_data, open_secret, rewrap, seal
 
-from samar_api.arena_run import arena_view, execute_arena
+from samar_api.arena_run import arena_view, execute_arena, load_history_split
 from samar_api.auth import (
     SessionUser,
     hash_password,
@@ -187,7 +187,7 @@ class AppState:
     ) -> AppState:
         if kek is None:
             kek = resolve_kek(os.environ.get("SAMAR_KEK", ""), os.environ.get("SAMAR_ENV", ""))
-        return cls(db_path, market or FixtureMarketData(), kek, http)
+        return cls(db_path, market or PreferLocalMarketData(), kek, http)
 
     def templates(self) -> list[StrategyView]:
         specs = [sma_cross_spec("AAPL"), rsi_mean_rev_spec("AAPL")]
@@ -234,14 +234,15 @@ class AppState:
         start: str,
         end: str,
     ) -> BacktestView:
-        self._load_spec(user_id, strategy_id)
+        spec = self._load_spec(user_id, strategy_id)
         backtest_id = _id("bt")
         job_id = _id("job")
         created = _now()
+        label = self.market.data_label((spec.universe[0], "SPY"))
         self.conn.execute(
             """INSERT INTO backtests
-            (id, user_id, strategy_id, status, created_at) VALUES (?, ?, ?, 'queued', ?)""",
-            (backtest_id, user_id, strategy_id, created),
+            (id, user_id, strategy_id, status, created_at, data_label) VALUES (?, ?, ?, 'queued', ?, ?)""",
+            (backtest_id, user_id, strategy_id, created, label),
         )
         self.conn.execute(
             """INSERT INTO jobs (id, user_id, job_key, status, backtest_id, created_at)
@@ -266,6 +267,7 @@ class AppState:
         contestants: list[tuple[str, str]],
         budget_proposals: int,
         token_cap: int,
+        ticker: str = "AAPL",
     ) -> ArenaRunView:
         ordered = sorted(_arena_contestants(contestants))
         if not 1 <= budget_proposals <= 8:
@@ -277,8 +279,18 @@ class AppState:
         for provider, _model in ordered:
             if provider != "random" and self.read_key(user_id, provider) is None:
                 raise ValueError(f"save a {provider} key first")
+        symbol = ticker.strip().upper()
+        if symbol not in ARENA_TICKERS:
+            names = ", ".join(ARENA_TICKERS)
+            raise ValueError(f"arena ticker must be one of {names}")
+        split = load_history_split(self.market, symbol)
+        label = self.market.data_label((symbol,))
+        train_start = split.train[0].timestamp.date().isoformat()
+        train_end = split.train[-1].timestamp.date().isoformat()
+        test_start = split.test[0].timestamp.date().isoformat()
+        test_end = split.test[-1].timestamp.date().isoformat()
         parts = [f"{provider}:{model}" for provider, model in ordered]
-        fingerprint = f"{budget_proposals}:{token_cap}:" + ",".join(parts)
+        fingerprint = f"{symbol}:{label}:{train_start}:{test_end}:{budget_proposals}:{token_cap}:" + ",".join(parts)
         job_key = f"arena:{user_id}:{fingerprint}"
         existing = self.conn.execute("SELECT backtest_id, status FROM jobs WHERE job_key = ?", (job_key,)).fetchone()
         if existing is not None:
@@ -288,9 +300,23 @@ class AppState:
         payload = [{"provider": provider, "model": model} for provider, model in ordered]
         self.conn.execute(
             """INSERT INTO arena_runs
-            (id, user_id, status, ticker, budget_proposals, token_cap, contestants_json, created_at)
-            VALUES (?, ?, 'queued', 'AAPL', ?, ?, ?, ?)""",
-            (run_id, user_id, budget_proposals, token_cap, json.dumps(payload), created),
+            (id, user_id, status, ticker, budget_proposals, token_cap, contestants_json, created_at,
+            train_start, train_end, test_start, test_end, data_label)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                user_id,
+                symbol,
+                budget_proposals,
+                token_cap,
+                json.dumps(payload),
+                created,
+                train_start,
+                train_end,
+                test_start,
+                test_end,
+                label,
+            ),
         )
         self.conn.execute(
             """INSERT INTO jobs (id, user_id, job_key, status, backtest_id, created_at)
@@ -374,11 +400,13 @@ class AppState:
             raise KeyError(backtest_id)
         spec = self._load_spec(user_id, row["strategy_id"])
         ticker = spec.universe[0]
-        bars = self.market.bars(ticker, date(2020, 1, 1), date(2024, 12, 31))
+        bars = self.market.bars(ticker, FULL_START, FULL_END)
+        if len(bars) < 2:
+            raise ValueError(f"no bars for {ticker}")
         engine = BacktestEngine(starting_cash=100_000.0, slippage_bps=5.0)
         result = engine.run(compile_strategy(spec), ticker, iter(bars))
         metrics = compute_metrics(result.portfolio)
-        bench_bars = self.market.bars("SPY", date(2020, 1, 1), date(2024, 12, 31))
+        bench_bars = self.market.bars("SPY", FULL_START, FULL_END)
         benchmark = buy_and_hold(bars, starting_cash=100_000.0)
         returns = daily_returns([point[1] for point in result.portfolio.equity_curve])
         _t_stat, p_value = sharpe_significance(returns)
@@ -397,13 +425,14 @@ class AppState:
         ]
         self.conn.execute(
             """UPDATE backtests SET metrics_json = ?, skepticism_json = ?, equity_json = ?,
-            benchmark_json = ?, trades_json = ? WHERE id = ?""",
+            benchmark_json = ?, trades_json = ?, data_label = ? WHERE id = ?""",
             (
                 json.dumps(metrics.__dict__),
                 skepticism.model_dump_json(),
                 json.dumps(equity),
                 json.dumps(bench_equity),
                 json.dumps(trades),
+                self.market.data_label((ticker, "SPY")),
                 backtest_id,
             ),
         )
@@ -475,7 +504,7 @@ class AppState:
         return inserted
 
     def _last_close(self, ticker: str) -> float | None:
-        bars = self.market.bars(ticker, date(2020, 1, 1), date(2024, 12, 31))
+        bars = self.market.bars(ticker, FULL_START, FULL_END)
         if not bars:
             return None
         return bars[-1].close
@@ -949,6 +978,7 @@ def _backtest_view(row: sqlite3.Row) -> BacktestView:
         benchmark_equity=benchmark,
         trades=trades,
         error=record["error"],
+        data_label=str(record["data_label"] or "SYNTHETIC DATA"),
     )
 
 

@@ -5,6 +5,7 @@ import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 
 import httpx
 from samar_agent.http_model import (
@@ -18,13 +19,8 @@ from samar_agent.http_model import (
 from samar_contracts.models import ArenaEntryView, ArenaProposalView, ArenaRunView, EquityPoint, SkepticismView
 from samar_data.market import MarketData
 from samar_engine.arena import (
-    FOLD_1,
-    FOLD_2,
     RANDOM_SEED,
-    TEST_END,
-    TEST_START,
-    TRAIN_END,
-    TRAIN_START,
+    HistorySplit,
     RankRow,
     Scorecard,
     best_train_index,
@@ -33,17 +29,21 @@ from samar_engine.arena import (
     rank_labels,
     score_buy_and_hold,
     score_spec,
+    split_history,
 )
 from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec, sma_cross_spec
 
-ARENA_PROMPT = (
-    "Propose one AAPL strategy. Put a StrategySpec JSON string in final. "
-    "action is null. action_input is {}. "
-    "You may use bars from 2020-01-02 through 2022-12-30 only. "
-    "Bars after 2022-12-30 are hidden. "
-    "Do not tell the person what to buy or sell."
-)
+
+def arena_prompt(ticker: str, train_start: str, train_end: str) -> str:
+    return (
+        f"Propose one {ticker} strategy. Put a StrategySpec JSON string in final. "
+        "action is null. action_input is {}. "
+        f"You may use bars from {train_start} through {train_end} only. "
+        f"Bars after {train_end} are hidden. "
+        "Do not tell the person what to buy or sell."
+    )
+
 
 _URLS: dict[ProviderName, tuple[str, str]] = {
     "anthropic": ("SAMAR_ANTHROPIC_URL", ANTHROPIC_URL),
@@ -75,9 +75,21 @@ class _Board:
     train: list[Bar]
     test: list[Bar]
     folds: tuple[list[Bar], list[Bar]]
+    train_start: str
+    train_end: str
     http: httpx.Client
     read_key: Callable[[str, str], str | None]
     user_id: str
+
+
+def load_history_split(market: MarketData, ticker: str) -> HistorySplit:
+    try:
+        bars = market.bars(ticker, date(1990, 1, 1), date(2100, 1, 1))
+        return split_history(bars)
+    except (ValueError, KeyError) as exc:
+        raise ValueError(
+            f"{ticker} has no cached bars and no synthetic fixture. Run: uv run python -m samar_data.fetch " + ticker
+        ) from exc
 
 
 def execute_arena(  # noqa: PLR0917
@@ -92,16 +104,32 @@ def execute_arena(  # noqa: PLR0917
     if run is None:
         raise KeyError(run_id)
     ticker = str(run["ticker"])
+    split = load_history_split(market, ticker)
     board = _Board(
         ticker=ticker,
         budget=int(run["budget_proposals"]),
         token_cap=int(run["token_cap"]),
-        train=market.bars(ticker, TRAIN_START, TRAIN_END),
-        test=market.bars(ticker, TEST_START, TEST_END),
-        folds=(market.bars(ticker, FOLD_1[0], FOLD_1[1]), market.bars(ticker, FOLD_2[0], FOLD_2[1])),
+        train=split.train,
+        test=split.test,
+        folds=split.folds,
+        train_start=split.train[0].timestamp.date().isoformat(),
+        train_end=split.train[-1].timestamp.date().isoformat(),
         http=http,
         read_key=read_key,
         user_id=user_id,
+    )
+    conn.execute(
+        """UPDATE arena_runs
+        SET train_start = ?, train_end = ?, test_start = ?, test_end = ?, data_label = ?
+        WHERE id = ?""",
+        (
+            board.train_start,
+            board.train_end,
+            split.test[0].timestamp.date().isoformat(),
+            split.test[-1].timestamp.date().isoformat(),
+            market.data_label((ticker,)),
+            run_id,
+        ),
     )
     conn.execute("DELETE FROM arena_entries WHERE run_id = ?", (run_id,))
     built = [_contestant(item, board) for item in _contestants(str(run["contestants_json"]))]
@@ -126,10 +154,11 @@ def arena_view(conn: sqlite3.Connection, user_id: str, run_id: str) -> ArenaRunV
         id=str(run["id"]),
         status=str(run["status"]),
         ticker=str(run["ticker"]),
-        train_start=TRAIN_START.isoformat(),
-        train_end=TRAIN_END.isoformat(),
-        test_start=TEST_START.isoformat(),
-        test_end=TEST_END.isoformat(),
+        train_start=str(run["train_start"] or ""),
+        train_end=str(run["train_end"] or ""),
+        test_start=str(run["test_start"] or ""),
+        test_end=str(run["test_end"] or ""),
+        data_label=str(run["data_label"] or "SYNTHETIC DATA"),
         budget_proposals=int(run["budget_proposals"]),
         token_cap=int(run["token_cap"]),
         entries=[_entry_view(row) for row in rows],
@@ -178,7 +207,7 @@ def _from_model(provider: str, model: str, chat: HttpChatModel, board: _Board) -
         if tokens_in + tokens_out >= board.token_cap:
             break
         try:
-            step = chat.step(ARENA_PROMPT, observations)
+            step = chat.step(arena_prompt(board.ticker, board.train_start, board.train_end), observations)
         except (ValueError, httpx.HTTPError) as exc:
             failures += 1
             proposals.append({"index": index, "ok": False, "error": str(exc)})

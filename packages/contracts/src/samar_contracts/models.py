@@ -59,6 +59,7 @@ class BacktestView(BaseModel):
     benchmark_equity: list[EquityPoint]
     trades: list[TradeView]
     error: str | None
+    data_label: str = "SYNTHETIC DATA"
 
 
 class SecretStatus(BaseModel):
@@ -138,6 +139,7 @@ class ArenaRunView(BaseModel):
     token_cap: int
     entries: list[ArenaEntryView]
     error: str | None
+    data_label: str = "SYNTHETIC DATA"
 
 
 class BrokerSnapshotView(BaseModel):

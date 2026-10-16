@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import csv
-import json
-import urllib.request
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
@@ -31,9 +30,31 @@ def bars_from_csv(path: Path, symbol: str) -> list[Bar]:
     return bars
 
 
+ARENA_TICKERS = (
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "TSLA",
+    "AVGO",
+    "SPY",
+    "QQQ",
+)
+REAL_DATA = "REAL DATA"
+SYNTHETIC_DATA = "SYNTHETIC DATA"
+FULL_START = date(1990, 1, 1)
+FULL_END = date(2100, 1, 1)
+
+
 class MarketData(Protocol):
     def bars(self, ticker: str, start: date, end: date) -> list[Bar]:
         """Daily bars with timestamps in [start, end]."""
+        ...
+
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        """REAL DATA when every ticker is a local cache file, otherwise SYNTHETIC DATA."""
         ...
 
 
@@ -44,6 +65,10 @@ class MemoryMarketData:
     def bars(self, ticker: str, start: date, end: date) -> list[Bar]:
         rows = self._series.get(ticker.upper(), [])
         return [bar for bar in rows if start <= bar.timestamp.date() <= end]
+
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        del tickers
+        return SYNTHETIC_DATA
 
 
 class FixtureMarketData:
@@ -62,90 +87,27 @@ class FixtureMarketData:
             self._cache[symbol] = bars_from_csv(path, symbol)
         return [bar for bar in self._cache[symbol] if start <= bar.timestamp.date() <= end]
 
-
-def _object(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ValueError("expected a JSON object")
-    parsed: dict[str, object] = {}
-    for key in value:
-        if isinstance(key, str):
-            parsed[key] = value[key]
-    return parsed
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        del tickers
+        return SYNTHETIC_DATA
 
 
-def _as_list(value: object) -> list[object]:
-    if not isinstance(value, list):
-        raise ValueError("expected a JSON list")
-    return [item for item in value if item is None or isinstance(item, (str, int, float, dict, list))]
+class PreferLocalMarketData:
+    """Read data/market when that CSV exists. Otherwise use the committed synthetic fixture."""
 
-
-def _objects(values: list[object]) -> list[dict[str, object]]:
-    return [_object(item) for item in values if isinstance(item, dict)]
-
-
-def _as_floats(values: object) -> list[float | None]:
-    if not isinstance(values, list):
-        raise ValueError("quote series is not a list")
-    out: list[float | None] = []
-    for value in values:
-        if value is None:
-            out.append(None)
-        else:
-            out.append(float(value))
-    return out
-
-
-class YFinanceMarketData:
-    """Yahoo chart endpoint, the same feed yfinance reads. Not used in unit tests."""
+    def __init__(self, cache_dir: Path | None = None, fixtures: FixtureMarketData | None = None) -> None:
+        self._cache = cache_dir or Path(os.environ.get("SAMAR_MARKET_DIR", "data/market"))
+        self._fixtures = fixtures or FixtureMarketData()
 
     def bars(self, ticker: str, start: date, end: date) -> list[Bar]:
-        period1 = int(datetime(start.year, start.month, start.day).timestamp())
-        period2 = int(datetime(end.year, end.month, end.day).timestamp()) + 86400
-        url = (
-            "https://query1.finance.yahoo.com/v8/finance/chart/"
-            f"{ticker}?period1={period1}&period2={period2}&interval=1d"
-        )
-        request = urllib.request.Request(url, headers={"User-Agent": "samar"})
-        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-            payload = _object(json.load(response))
-        chart = _object(payload["chart"])
-        results = _objects(_as_list(chart["result"]))
-        if not results:
-            raise ValueError("yahoo chart has no result")
-        result = results[0]
-        stamps = _as_list(result["timestamp"])
-        indicators = _object(result["indicators"])
-        quotes = _objects(_as_list(indicators["quote"]))
-        if not quotes:
-            raise ValueError("yahoo quote missing")
-        quote = quotes[0]
-        opens = _as_floats(quote["open"])
-        highs = _as_floats(quote["high"])
-        lows = _as_floats(quote["low"])
-        closes = _as_floats(quote["close"])
-        volumes = _as_floats(quote["volume"])
-        bars: list[Bar] = []
-        for index, stamp in enumerate(stamps):
-            raw_open = opens[index]
-            raw_close = closes[index]
-            raw_high = highs[index]
-            raw_low = lows[index]
-            if None in (raw_open, raw_close, raw_high, raw_low):
-                continue
-            if raw_open is None or raw_close is None or raw_high is None or raw_low is None:
-                continue
-            volume = volumes[index]
-            if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
-                continue
-            bars.append(
-                Bar(
-                    symbol=ticker.upper(),
-                    timestamp=datetime.fromtimestamp(float(stamp)),
-                    open=raw_open,
-                    high=raw_high,
-                    low=raw_low,
-                    close=raw_close,
-                    volume=0.0 if volume is None else volume,
-                )
-            )
-        return bars
+        symbol = ticker.upper()
+        path = self._cache / f"{symbol}.csv"
+        if path.is_file():
+            series = bars_from_csv(path, symbol)
+            return [bar for bar in series if start <= bar.timestamp.date() <= end]
+        return self._fixtures.bars(symbol, start, end)
+
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        if tickers and all((self._cache / f"{ticker.upper()}.csv").is_file() for ticker in tickers):
+            return REAL_DATA
+        return SYNTHETIC_DATA

@@ -49,6 +49,7 @@ export type BacktestView = {
   benchmark_equity: EquityPoint[];
   trades: TradeView[];
   error: string | null;
+  data_label: "REAL DATA" | "SYNTHETIC DATA";
 };
 
 export type SecretStatus = {
@@ -129,6 +130,7 @@ export type ArenaRunView = {
   token_cap: number;
   entries: ArenaEntryView[];
   error: string | null;
+  data_label: "REAL DATA" | "SYNTHETIC DATA";
 };
 
 export type SessionView = {

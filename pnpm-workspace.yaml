@@ -1,2 +1,7 @@
 packages:
   - "apps/web"
+
+# pnpm 11 ignores onlyBuiltDependencies. These two packages must run their install scripts.
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true

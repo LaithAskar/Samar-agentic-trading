@@ -8,6 +8,8 @@ Live trading is off. It can send real Public.com orders and you can lose money. 
 
 ```bash
 uv sync --all-packages --group dev
+corepack enable
+corepack prepare pnpm@11.4.0 --activate
 pnpm install
 uv run python -m samar_api
 pnpm --filter web dev
@@ -16,7 +18,7 @@ uv run python -m samar_worker
 
 The site is [http://127.0.0.1:43123](http://127.0.0.1:43123). The API is [http://127.0.0.1:43124](http://127.0.0.1:43124). Create an account on the first screen. The session token stays in the browser tab. The worker is the process that keeps auto mode running after you close the browser. `SAMAR_WORKER_SECONDS` defaults to 60.
 
-`make verify` runs the lint, type, import boundary, secret scan, and behavior tests. That is the same command CI runs. `scripts/clean_clone_check.sh` clones HEAD into an empty directory and runs `uv sync --all-packages --group dev`, `pnpm install`, and `make verify` there, so a gitignore rule cannot hide a workspace member that the lockfile still names.
+`make verify` runs the lint, type, import boundary, secret scan, and behavior tests. That is the same command CI runs. The web install is pnpm 11.4.0 (`packageManager` in `package.json`). pnpm 11 only runs install scripts listed under `allowBuilds` in `pnpm-workspace.yaml`; `esbuild` and `unrs-resolver` are allowed. If `gitleaks` is missing on your machine, `make verify` prints the v8.24.3 install link and continues. CI still fails the job when that binary is missing. `scripts/clean_clone_check.sh` clones HEAD into an empty directory and runs `uv sync --all-packages --group dev`, `pnpm install`, and `make verify` there, so a gitignore rule cannot hide a workspace member that the lockfile still names.
 
 Set `SAMAR_KEK` to 64 hex characters before anyone else can open the database. An empty value uses a fixed development key and prints a warning. Set `SAMAR_ENV` to `production`, or any name other than `dev`, `development`, `local`, or `test`, and a missing or development key stops the process. Set `SAMAR_SUPABASE_URL` and `SAMAR_SUPABASE_ANON_KEY` to check Supabase access tokens instead of the local account table.
 
@@ -75,7 +77,15 @@ flowchart LR
 
 `packages/engine` is pure. It cannot import HTTP, the clock, or the market adapter. `packages/data` reads the frozen CSVs under `packages/data/src/samar_data/fixtures/`. `apps/worker` claims one queued backtest and, when auto mode is on, runs one live cycle. It does not import the order client. `supabase/migrations/0001_init.sql` is the Postgres row-level security contract. The process you start locally uses sqlite. Live tables are sqlite only.
 
-The AAPL and SPY files are a seeded random walk written by `scripts/write_price_fixtures.py` (AAPL seed 20201014 starting at 100, SPY seed 20201015 starting at 300, weekdays from 2020-01-02 through 2024-12-31). They are original to this repository and covered by the MIT license. They are not a market-data vendor download. A local Yahoo chart pull was used while building the first backtest and is not in git. [Yahoo Finance says not to redistribute information it provides](https://help.yahoo.com/kb/SLN2310.html), and it attributes US equity history to Commodity Systems, Inc.
+The committed AAPL and SPY files are a seeded random walk written by `scripts/write_price_fixtures.py` (AAPL seed 20201014 starting at 100, SPY seed 20201015 starting at 300, weekdays from 2020-01-02 through 2024-12-31). They are original to this repository and covered by the MIT license. They are not a market-data vendor download. A result that uses them is labeled SYNTHETIC DATA.
+
+Real history stays on your machine. Yahoo Finance forbids automated collection without prior permission and forbids redistribution. Alpha Vantage's free key returns 100 daily points; a full history is a paid plan. Stooq is personal-use only and has been refusing scripted downloads. Public's individual API is the personal key you already use. Its market-data addendum lets a non-professional keep bars for their own non-business use and forbids giving those bars to anyone else. The command writes Public's TEN_YEARS daily regular-session chart into `data/market/` (or `SAMAR_MARKET_DIR`), which git ignores. That schema has no separate adjusted-close field. A backtest or Arena run that reads only those files is labeled REAL DATA. If any series it needs is still the committed fixture, the label stays SYNTHETIC DATA.
+
+```bash
+SAMAR_PUBLIC_SECRET='pub-...' uv run python -m samar_data.fetch AAPL MSFT NVDA AMZN GOOGL META TSLA AVGO SPY QQQ
+```
+
+The Arena ticker list is those ten names. Train is the first 60 percent of whatever daily bars are available. The rest is the held-out window, split into two folds. AAPL and SPY also have synthetic fixtures, so they run before you fetch. The other eight need the command above.
 
 ## What the tests lock
 
@@ -87,7 +97,7 @@ You bring the keys. Samar does not ship a model key or a brokerage key. Each sec
 
 ## Model arena
 
-Arena compares saved providers on one frozen AAPL file. Search sees 2020-01-02 through 2022-12-30 only. The rank is the held-out Sharpe from 2023-01-03 through 2024-12-31, minus a haircut of `sharpe_se * sqrt(2 * ln(trials))`. Walk-forward fold Sharpes are reported and are not the rank. Baselines are buy-and-hold and the SMA 20/50 rule. Random search is the seeded control. Each contestant gets the same proposal budget, the same token cap, the same spec schema, and the same 5 basis points of slippage.
+Arena compares saved providers on one ticker from the ten-name list. Search sees the first 60 percent of the daily bars that are available. The rank is the held-out Sharpe on the remaining bars, minus a haircut of `sharpe_se * sqrt(2 * ln(trials))`. Walk-forward fold Sharpes split that held-out window in half and are not the rank. Baselines are buy-and-hold and the SMA 20/50 rule. Random search is the seeded control. Each contestant gets the same proposal budget, the same token cap, the same spec schema, and the same 5 basis points of slippage. The page and the API both show REAL DATA or SYNTHETIC DATA.
 
 Save a provider key in Settings, open Arena, pick the contestants, and run. The run is one job. Posting the same contestants again returns the same run. A model that returns an invalid spec records a failure and still spends a trial. The result is a historical backtest on a small sample. It is not a prediction and it is not advice.
 

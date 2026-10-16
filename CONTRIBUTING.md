@@ -6,11 +6,13 @@ Samar is a paper-trading practice app with an optional live path. It is not fina
 
 ```bash
 uv sync --all-packages --group dev
+corepack enable
+corepack prepare pnpm@11.4.0 --activate
 pnpm install
 make verify
 ```
 
-`make verify` is the gate. It includes gitleaks on the working tree, the lint and type checks, the behavior tests, and the order-path ban. CI runs that command and also runs gitleaks over the full git history.
+`make verify` is the gate. It includes the secret scan when `gitleaks` is on PATH, the lint and type checks, the behavior tests, and the order-path ban. Without `gitleaks`, the local run prints the v8.24.3 install link and continues. CI installs that release and fails if it is missing. CI also runs gitleaks over the full git history. Use pnpm 11.4.0, the version in `packageManager`.
 
 ## Keys
 

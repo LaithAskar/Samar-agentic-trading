@@ -31,8 +31,12 @@ export default function BacktestsPage() {
       <ul className="space-y-2">
         {rows.map((row) => (
           <li key={row.id}>
-            <Link href={`/backtests/${row.id}`} className="flex justify-between rounded-md border border-line px-4 py-3 text-sm">
+            <Link
+              href={`/backtests/${row.id}`}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line px-4 py-3 text-sm"
+            >
               <span className="num">{row.id}</span>
+              <span>{row.data_label}</span>
               <span>{row.status}</span>
               <span className="num">{row.metrics ? pct(row.metrics.total_return_pct) : ""}</span>
             </Link>

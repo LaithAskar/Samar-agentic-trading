@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from samar_api.app import create_app
-from samar_api.arena_run import ARENA_PROMPT
+from samar_api.arena_run import arena_prompt
 from samar_api.service import AppState, resolve_kek
 from samar_contracts.models import SecretStatus
-from samar_data.market import FixtureMarketData, MemoryMarketData
+from samar_data.market import FixtureMarketData, MemoryMarketData, PreferLocalMarketData
 from samar_engine.arena import random_specs
 from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec
@@ -148,12 +149,43 @@ def test_backtest_job_runs_once() -> None:
     assert done.status_code == 200
     body = done.json()
     assert body["status"] == "succeeded"
+    assert body["data_label"] == "SYNTHETIC DATA"
     assert body["trades"] == [{"date": "2024-01-03", "side": "BUY", "quantity": 9000.0, "price": 10.005}]
     assert body["metrics"]["ending_equity"] == 99955.0
     assert client.post("/jobs/run-once").json() == {"ran": 0}
     again = client.get(f"/backtests/{backtest_id}").json()
     assert again["trades"] == body["trades"]
     assert again["metrics"]["ending_equity"] == 99955.0
+
+
+def test_backtest_prefers_a_local_cache_and_labels_real_data(tmp_path: Path) -> None:
+    row = (
+        "date,open,high,low,close,volume\n"
+        "2024-01-02,9,9,9,9,1000\n"
+        "2024-01-03,10,11,10,11,1000\n"
+        "2024-01-04,11,11,11,11,1000\n"
+    )
+    (tmp_path / "AAPL.csv").write_text(row, encoding="utf-8")
+    (tmp_path / "SPY.csv").write_text(row, encoding="utf-8")
+    state = AppState(
+        ":memory:",
+        PreferLocalMarketData(tmp_path, FixtureMarketData()),
+        kek=b"k" * 32,
+        http=httpx.Client(transport=httpx.MockTransport(_fail)),
+    )
+    client = TestClient(create_app(state))
+    registered = client.post("/auth/register", json={"email": "real@example.com", "password": "real-password-1"})
+    client.headers["Authorization"] = f"Bearer {registered.json()['token']}"
+    created = client.post("/strategies", json={"dsl": _spec()})
+    queued = client.post("/backtests", json={"strategy_id": created.json()["id"]})
+    assert queued.json()["data_label"] == "REAL DATA"
+    assert client.post("/jobs/run-once").json() == {"ran": 1}
+    body = client.get(f"/backtests/{queued.json()['id']}").json()
+    assert body["data_label"] == "REAL DATA"
+    assert body["trades"] == [{"date": "2024-01-04", "side": "BUY", "quantity": 9000.0, "price": 11.0055}]
+    (tmp_path / "SPY.csv").unlink()
+    mixed = client.post("/backtests", json={"strategy_id": created.json()["id"]})
+    assert mixed.json()["data_label"] == "SYNTHETIC DATA"
 
 
 def test_user_isolation() -> None:
@@ -474,6 +506,8 @@ def test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent() -> None:
     )
     assert again.json()["id"] == run_id
     view = client.get(f"/arena/runs/{run_id}").json()
+    assert view["data_label"] == "SYNTHETIC DATA"
+    assert view["ticker"] == "AAPL"
     assert [(row["contestant"], row["model"]) for row in view["entries"]] == [
         ("openai", "gpt-4o-mini"),
         ("baseline", "sma_20_50"),
@@ -481,22 +515,22 @@ def test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent() -> None:
         ("baseline", "buy_and_hold"),
     ]
     assert [row["rank"] for row in view["entries"]] == [1, 2, 3, 4]
-    assert view["entries"][0]["deflated_sharpe"] == pytest.approx(-0.06641122774977888)
-    assert view["entries"][0]["test_sharpe"] == pytest.approx(-0.0014078734738393864)
-    assert view["entries"][0]["test_sharpe_se"] == pytest.approx(0.043852922695639444)
+    assert view["entries"][0]["deflated_sharpe"] == pytest.approx(-0.06634746529320527)
+    assert view["entries"][0]["test_sharpe"] == pytest.approx(-0.0014065242995221579)
+    assert view["entries"][0]["test_sharpe_se"] == pytest.approx(0.0438108171016673)
     assert view["entries"][0]["test_max_drawdown_pct"] == pytest.approx(19.627544429609667)
     assert view["entries"][0]["turnover"] == 9
-    assert view["entries"][0]["fold_sharpes"] == pytest.approx([0.9267402396015714, -0.5623460417286588])
+    assert view["entries"][0]["fold_sharpes"] == pytest.approx([0.7249192938613018, -0.5623460417286588])
     assert view["entries"][0]["n_trials"] == 3
     assert view["entries"][0]["n_failures"] == 2
     assert view["entries"][0]["tokens_in"] == 4
     assert view["entries"][0]["tokens_out"] == 6
-    assert view["entries"][1]["deflated_sharpe"] == pytest.approx(-0.09826321406235547)
+    assert view["entries"][1]["deflated_sharpe"] == pytest.approx(-0.0981690441684318)
     assert view["entries"][1]["turnover"] == 4
-    assert view["entries"][2]["deflated_sharpe"] == pytest.approx(-0.1634232596783104)
-    assert view["entries"][2]["test_sharpe"] == pytest.approx(-0.09826321406235547)
+    assert view["entries"][2]["deflated_sharpe"] == pytest.approx(-0.16326622651831296)
+    assert view["entries"][2]["test_sharpe"] == pytest.approx(-0.0981690441684318)
     assert view["entries"][2]["turnover"] == 4
-    assert view["entries"][2]["fold_sharpes"] == pytest.approx([1.2613941186664213, -0.927011493162725])
+    assert view["entries"][2]["fold_sharpes"] == pytest.approx([1.0171708001046442, -0.927011493162725])
     openai = view["entries"][0]
     assert openai["proposals"][0]["ok"] is False
     assert openai["proposals"][1]["spec_name"] == "sma_cross"
@@ -504,10 +538,33 @@ def test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent() -> None:
     assert "Historical backtest on a small sample. Not a prediction." in openai["skepticism"]["warnings"]
     assert client.get("/strategies").json() == []
     assert str(seen[0].url) == "https://api.openai.com/v1/chat/completions"
-    assert ARENA_PROMPT.encode() in seen[0].content
+    assert b"Propose one AAPL strategy" in seen[0].content
+    assert b"Do not tell the person what to buy or sell." in seen[0].content
+    assert arena_prompt("AAPL", view["train_start"], view["train_end"]).encode() in seen[0].content
     assert b"2024-12-31" not in seen[0].content
     assert b"train sharpe=" in seen[2].content
     assert b"2024-12-31" not in seen[2].content
+
+
+def test_arena_ticker_must_be_in_the_ten_name_universe() -> None:
+    state = AppState(":memory:", FixtureMarketData(), kek=b"k" * 32, http=httpx.Client())
+    client = TestClient(create_app(state))
+    registered = client.post("/auth/register", json={"email": "tick@example.com", "password": "tick-password-1"})
+    client.headers["Authorization"] = f"Bearer {registered.json()['token']}"
+    body = {
+        "contestants": [{"provider": "random", "model": "random-search"}],
+        "budget_proposals": 1,
+        "token_cap": 100,
+    }
+    rejected = client.post("/arena/runs", json={**body, "ticker": "ZZZZ"})
+    assert rejected.status_code == 422
+    missing = client.post("/arena/runs", json={**body, "ticker": "MSFT"})
+    assert missing.status_code == 422
+    assert "samar_data.fetch" in missing.json()["detail"]
+    accepted = client.post("/arena/runs", json={**body, "ticker": "SPY"})
+    assert accepted.status_code == 200
+    assert accepted.json()["ticker"] == "SPY"
+    assert accepted.json()["data_label"] == "SYNTHETIC DATA"
 
 
 def test_supabase_bearer_isolates_users(monkeypatch: pytest.MonkeyPatch) -> None:

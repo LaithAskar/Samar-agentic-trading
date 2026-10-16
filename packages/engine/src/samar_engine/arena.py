@@ -19,6 +19,31 @@ TEST_END = date(2024, 12, 31)
 FOLD_1 = (date(2023, 1, 3), date(2023, 12, 29))
 FOLD_2 = (date(2024, 1, 2), date(2024, 12, 31))
 STARTING_CASH = 100_000.0
+
+
+@dataclass(frozen=True)
+class HistorySplit:
+    train: list[Bar]
+    test: list[Bar]
+    folds: tuple[list[Bar], list[Bar]]
+
+
+def split_history(bars: list[Bar]) -> HistorySplit:
+    """Train is the first 60 percent of the bars. The rest is held out and folded in half."""
+    ordered = sorted(bars, key=lambda bar: bar.timestamp)
+    if len(ordered) < 80:
+        raise ValueError("need at least 80 daily bars to split train and test")
+    cut = int(len(ordered) * 0.6)
+    train = ordered[:cut]
+    test = ordered[cut:]
+    if len(train) < 50 or len(test) < 20:
+        raise ValueError("train needs 50 bars and the held-out window needs 20")
+    mid = len(test) // 2
+    if mid < 2 or len(test) - mid < 2:
+        raise ValueError("held-out window is too short to fold")
+    return HistorySplit(train, test, (test[:mid], test[mid:]))
+
+
 SLIPPAGE_BPS = 5.0
 RANDOM_SEED = 1
 
