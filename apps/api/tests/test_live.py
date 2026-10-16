@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -9,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from samar_api.app import create_app
+from samar_api.live import book as book_module
 from samar_api.live.book import LiveBook
 from samar_api.live.limits import ALLOWLIST, AUTO_PHRASE, ENABLE_PHRASE, evaluate, sell_proceeds_unsettled, whole_shares
 from samar_api.live.signal import strategy_intent
@@ -124,17 +127,17 @@ class Script:
         return [url for method, url, _body in self.calls if method == "DELETE"]
 
 
-def _state(script: Script) -> AppState:
+def _state(script: Script, path: str = ":memory:") -> AppState:
     return AppState(
-        ":memory:",
+        path,
         MemoryMarketData({"AAPL": _bars()}),
         kek=b"k" * 32,
         http=httpx.Client(transport=httpx.MockTransport(script)),
     )
 
 
-def _session(script: Script) -> tuple[TestClient, AppState, str, LiveBook]:
-    state = _state(script)
+def _session(script: Script, path: str = ":memory:") -> tuple[TestClient, AppState, str, LiveBook]:
+    state = _state(script, path)
     client = TestClient(create_app(state))
     registered = client.post("/auth/register", json={"email": "demo@example.com", "password": "demo-password-1"})
     assert registered.status_code == 200
@@ -674,3 +677,82 @@ def test_held_positions_count_against_the_capital_cap() -> None:
     assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": unknown})).reason == "position value is unknown"
     sell = _ok_intent().model_copy(update={"side": "SELL", "quantity": 5})
     assert evaluate(sell, ctx.model_copy(update={"positions": unknown, "open_buys": 500})).ok is True
+
+
+def _pace_evaluate(monkeypatch: pytest.MonkeyPatch, parties: int) -> None:
+    """Hold the first guard checks until every racer has reached one."""
+    real = book_module.evaluate
+    gate = threading.Barrier(parties, timeout=2)
+    lock = threading.Lock()
+    seen = [0]
+
+    def paced(intent: OrderIntent, ctx: GuardContext) -> object:
+        with lock:
+            seen[0] += 1
+            wait = seen[0] <= parties
+        if wait:
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:
+                pass
+        return real(intent, ctx)
+
+    monkeypatch.setattr(book_module, "evaluate", paced)
+
+
+def _race(*jobs: Callable[[], object]) -> list[object]:
+    results: list[object] = [None] * len(jobs)
+
+    def run(index: int, job: Callable[[], object]) -> None:
+        try:
+            results[index] = job()
+        except Exception as exc:
+            results[index] = exc
+
+    threads = [threading.Thread(target=run, args=(index, job)) for index, job in enumerate(jobs)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    return results
+
+
+def test_worker_and_check_cannot_send_the_same_order_twice(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = Script()
+    path = str(tmp_path) + "/live.db"
+    _client, state, user_id, api_book = _session(script, path)
+    _arm(api_book, user_id)
+    worker = _state(script, path)
+    worker_book = LiveBook(worker.conn, worker.http, worker.read_key, worker.market)
+    _pace_evaluate(monkeypatch, 2)
+    results = _race(
+        lambda: worker_book.run_cycle(user_id, OPEN, _ok_intent),
+        lambda: api_book.run_cycle(user_id, OPEN, _ok_intent),
+    )
+    assert sorted(str(result) for result in results) == ["0", "1"]
+    assert len(script.places) == 1
+    tickets = state.conn.execute("SELECT status FROM live_tickets WHERE user_id = ?", (user_id,)).fetchall()
+    assert [row["status"] for row in tickets] == ["sent"]
+
+
+def test_two_approvals_of_one_ticket_send_once(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = Script()
+    path = str(tmp_path) + "/live.db"
+    _client, state, user_id, book = _session(script, path)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    second = _state(script, path)
+    other = LiveBook(second.conn, second.http, second.read_key, second.market)
+    _pace_evaluate(monkeypatch, 2)
+    results = _race(lambda: book.approve(user_id, ticket.id, OPEN), lambda: other.approve(user_id, ticket.id, OPEN))
+    assert len(script.places) == 1
+    assert sum(1 for result in results if isinstance(result, ValueError)) == 1
+
+
+def test_a_second_ticket_for_a_working_order_is_refused() -> None:
+    script = Script()
+    _client, _state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    book.propose(user_id, _ok_intent(), OPEN)
+    with pytest.raises(ValueError, match="AAPL BUY is already working"):
+        book.propose(user_id, _ok_intent(), OPEN)

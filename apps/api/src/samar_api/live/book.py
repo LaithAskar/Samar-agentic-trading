@@ -235,14 +235,25 @@ class LiveBook:
         ticket_id = f"tkt_{uuid.uuid4().hex[:12]}"
         expires = now + timedelta(minutes=TICKET_MINUTES)
         est = round(intent.quantity * intent.limit_price, 2)
-        self.conn.execute(
+        symbol = intent.symbol.upper()
+        day_start = now.astimezone(NY).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+        # One statement checks for a working order and inserts, so a worker and /live/check cannot both pass.
+        inserted = self.conn.execute(
             """INSERT INTO live_tickets
             (id, user_id, symbol, side, qty, limit_price, est_cost, reason, model, status, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM live_tickets
+                WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('pending', 'sending')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM live_orders
+                WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('submitted', 'open') AND created_at >= ?
+            )""",
             (
                 ticket_id,
                 user_id,
-                intent.symbol.upper(),
+                symbol,
                 intent.side,
                 intent.quantity,
                 intent.limit_price,
@@ -251,9 +262,20 @@ class LiveBook:
                 intent.model,
                 now.isoformat(),
                 expires.isoformat(),
+                user_id,
+                symbol,
+                intent.side,
+                user_id,
+                symbol,
+                intent.side,
+                day_start.isoformat(),
             ),
-        )
-        self._audit(user_id, "ticket", f"{intent.side} {intent.quantity} {intent.symbol.upper()}", now)
+        ).rowcount
+        if inserted != 1:
+            self._audit(user_id, "working", f"{symbol} already working", now)
+            self.conn.commit()
+            raise ValueError(f"{symbol} {intent.side} is already working")
+        self._audit(user_id, "ticket", f"{intent.side} {intent.quantity} {symbol}", now)
         self.conn.commit()
         if row["mode"] == "auto":
             self._send(user_id, ticket_id, now)
@@ -400,6 +422,26 @@ class LiveBook:
         return model_intent(provider, model, key, self.http)
 
     def _send(self, user_id: str, ticket_id: str, now: datetime) -> None:
+        claimed = self.conn.execute(
+            "UPDATE live_tickets SET status = 'sending' WHERE id = ? AND user_id = ? AND status = 'pending'",
+            (ticket_id, user_id),
+        ).rowcount
+        self.conn.commit()
+        if claimed != 1:
+            if self._ticket_row(user_id, ticket_id) is None:
+                raise KeyError(ticket_id)
+            raise ValueError("ticket is not pending")
+        try:
+            self._send_claimed(user_id, ticket_id, now)
+        finally:
+            # A failure that set no final status leaves the ticket retryable with the same order id.
+            self.conn.execute(
+                "UPDATE live_tickets SET status = 'pending' WHERE id = ? AND status = 'sending'",
+                (ticket_id,),
+            )
+            self.conn.commit()
+
+    def _send_claimed(self, user_id: str, ticket_id: str, now: datetime) -> None:
         ticket = self._ticket_row(user_id, ticket_id)
         if ticket is None:
             raise KeyError(ticket_id)
@@ -582,7 +624,7 @@ class LiveBook:
             return True
         ticket = self.conn.execute(
             """SELECT id FROM live_tickets
-            WHERE user_id = ? AND symbol = ? AND side = ? AND status = 'pending'""",
+            WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('pending', 'sending')""",
             (user_id, symbol, side),
         ).fetchone()
         return ticket is not None
