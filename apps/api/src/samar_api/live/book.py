@@ -9,7 +9,8 @@ from typing import Literal, cast
 
 import httpx
 from samar_agent.http_model import ProviderName
-from samar_data.market import MarketData
+from samar_data.market import REAL_DATA, MarketData
+from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec
 
 from samar_api.live.limits import (
@@ -19,6 +20,7 @@ from samar_api.live.limits import (
     NY,
     REJECT_LIMIT,
     TICKET_MINUTES,
+    bars_current,
     evaluate,
     market_open,
     sell_proceeds_unsettled,
@@ -49,6 +51,10 @@ from samar_api.live.types import (
 KeyReader = Callable[[str, str], str | None]
 Proposer = Callable[[], OrderIntent | None]
 _OPEN = ("submitted", "open")
+
+
+class PriceDataError(ValueError):
+    """Live strategy mode needs real, current daily bars."""
 
 
 class LiveBook:
@@ -208,6 +214,11 @@ class LiveBook:
             raise ValueError("pick a model provider")
         if choice.source == "model" and not choice.model.strip():
             raise ValueError("pick a model")
+        if choice.source == "strategy":
+            spec = self._spec(user_id, choice.strategy_id)
+            if spec is None:
+                raise ValueError("pick a strategy")
+            self._live_bars(spec.universe[0], now)
         self._settings(user_id)
         self.conn.execute(
             """UPDATE live_settings
@@ -235,14 +246,25 @@ class LiveBook:
         ticket_id = f"tkt_{uuid.uuid4().hex[:12]}"
         expires = now + timedelta(minutes=TICKET_MINUTES)
         est = round(intent.quantity * intent.limit_price, 2)
-        self.conn.execute(
+        symbol = intent.symbol.upper()
+        day_start = now.astimezone(NY).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+        # One statement checks for a working order and inserts, so a worker and /live/check cannot both pass.
+        inserted = self.conn.execute(
             """INSERT INTO live_tickets
             (id, user_id, symbol, side, qty, limit_price, est_cost, reason, model, status, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM live_tickets
+                WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('pending', 'sending')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM live_orders
+                WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('submitted', 'open') AND created_at >= ?
+            )""",
             (
                 ticket_id,
                 user_id,
-                intent.symbol.upper(),
+                symbol,
                 intent.side,
                 intent.quantity,
                 intent.limit_price,
@@ -251,9 +273,20 @@ class LiveBook:
                 intent.model,
                 now.isoformat(),
                 expires.isoformat(),
+                user_id,
+                symbol,
+                intent.side,
+                user_id,
+                symbol,
+                intent.side,
+                day_start.isoformat(),
             ),
-        )
-        self._audit(user_id, "ticket", f"{intent.side} {intent.quantity} {intent.symbol.upper()}", now)
+        ).rowcount
+        if inserted != 1:
+            self._audit(user_id, "working", f"{symbol} already working", now)
+            self.conn.commit()
+            raise ValueError(f"{symbol} {intent.side} is already working")
+        self._audit(user_id, "ticket", f"{intent.side} {intent.quantity} {symbol}", now)
         self.conn.commit()
         if row["mode"] == "auto":
             self._send(user_id, ticket_id, now)
@@ -302,8 +335,26 @@ class LiveBook:
         ).fetchall()
         placed = 0
         for row in rows:
-            placed += self.run_cycle(str(row["user_id"]), now, None)
+            user_id = str(row["user_id"])
+            try:
+                placed += self.run_cycle(user_id, now, None)
+            except Exception as exc:
+                self._cycle_failed(user_id, exc, now)
         return placed
+
+    def _cycle_failed(self, user_id: str, exc: Exception, now: datetime) -> None:
+        """One user's failure must not stop the other users' cycles or loss-stop checks."""
+        if self.conn.in_transaction:
+            self.conn.rollback()
+        self._audit(user_id, "cycle_error", type(exc).__name__, now)
+        self.conn.commit()
+        try:
+            self.halt(user_id, "cycle error", now)
+        except Exception as halt_exc:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            self._audit(user_id, "halt_failed", type(halt_exc).__name__, now)
+            self.conn.commit()
 
     def run_cycle(self, user_id: str, now: datetime, proposer: Proposer | None) -> int:
         row = self._settings(user_id)
@@ -331,18 +382,8 @@ class LiveBook:
         if pnl <= -float(row["daily_loss_stop"]):
             self.halt(user_id, "daily loss stop is hit", now)
             return 0
-        try:
-            intent = self._intent(user_id, view, proposer)
-        except ModelOutputError:
-            self._audit(user_id, "model_invalid", "model output invalid", now)
-            self.conn.commit()
-            return 0
-        except BrokerError:
-            self.halt(user_id, "broker error", now)
-            return 0
+        intent = self._cycle_intent(user_id, view, proposer, now)
         if intent is None:
-            self._audit(user_id, "flat", "no order", now)
-            self.conn.commit()
             return 0
         if self._working(user_id, intent.symbol.upper(), intent.side):
             self._audit(user_id, "working", f"{intent.symbol} already working", now)
@@ -360,7 +401,29 @@ class LiveBook:
             return 1
         return 0
 
-    def _intent(self, user_id: str, view: AccountState, proposer: Proposer | None) -> OrderIntent | None:
+    def _cycle_intent(
+        self, user_id: str, view: AccountState, proposer: Proposer | None, now: datetime
+    ) -> OrderIntent | None:
+        """The next order, or None after recording why there is none."""
+        try:
+            intent = self._intent(user_id, view, proposer, now)
+        except PriceDataError as exc:
+            self._audit(user_id, "data_refused", str(exc), now)
+            self.conn.commit()
+            return None
+        except ModelOutputError:
+            self._audit(user_id, "model_invalid", "model output invalid", now)
+            self.conn.commit()
+            return None
+        except BrokerError:
+            self.halt(user_id, "broker error", now)
+            return None
+        if intent is None:
+            self._audit(user_id, "flat", "no order", now)
+            self.conn.commit()
+        return intent
+
+    def _intent(self, user_id: str, view: AccountState, proposer: Proposer | None, now: datetime) -> OrderIntent | None:
         if proposer is not None:
             return proposer()
         row = self._settings(user_id)
@@ -368,27 +431,41 @@ class LiveBook:
         if source == "off":
             return None
         if source == "strategy":
-            return self._strategy_intent(user_id, view)
+            return self._strategy_intent(user_id, view, now)
         return self._model_intent(user_id)
 
-    def _strategy_intent(self, user_id: str, view: AccountState) -> OrderIntent | None:
+    def _strategy_intent(self, user_id: str, view: AccountState, now: datetime) -> OrderIntent | None:
         row = self._settings(user_id)
-        spec_row = self.conn.execute(
-            "SELECT dsl_json FROM strategies WHERE id = ? AND user_id = ?",
-            (row["strategy_id"], user_id),
-        ).fetchone()
-        if spec_row is None:
+        spec = self._spec(user_id, str(row["strategy_id"] or ""))
+        if spec is None:
             return None
-        spec = StrategySpec.model_validate_json(spec_row["dsl_json"])
         symbol = spec.universe[0]
+        bars = self._live_bars(symbol, now)
         quote = self._orders_client(self._public_secret(user_id)).quote(view.account_id, symbol)
-        bars = self.market.bars(symbol, date(2020, 1, 1), date(2026, 12, 31))
         held = 0.0
         for position in view.positions:
             if position.symbol.upper() == symbol.upper():
                 held = position.quantity
         limits = _limits(row)
         return strategy_intent(spec, bars, quote, limits, held)
+
+    def _spec(self, user_id: str, strategy_id: str) -> StrategySpec | None:
+        spec_row = self.conn.execute(
+            "SELECT dsl_json FROM strategies WHERE id = ? AND user_id = ?",
+            (strategy_id, user_id),
+        ).fetchone()
+        if spec_row is None:
+            return None
+        return StrategySpec.model_validate_json(spec_row["dsl_json"])
+
+    def _live_bars(self, symbol: str, now: datetime) -> list[Bar]:
+        """Refuse committed synthetic fixtures and stale caches before a strategy can size a live order."""
+        if self.market.data_label((symbol,)) != REAL_DATA:
+            raise PriceDataError(f"price data for {symbol} is not real")
+        bars = self.market.bars(symbol, date(2020, 1, 1), now.astimezone(NY).date())
+        if not bars or not bars_current(bars[-1].timestamp, now):
+            raise PriceDataError(f"price data for {symbol} is stale")
+        return bars
 
     def _model_intent(self, user_id: str) -> OrderIntent:
         row = self._settings(user_id)
@@ -400,6 +477,26 @@ class LiveBook:
         return model_intent(provider, model, key, self.http)
 
     def _send(self, user_id: str, ticket_id: str, now: datetime) -> None:
+        claimed = self.conn.execute(
+            "UPDATE live_tickets SET status = 'sending' WHERE id = ? AND user_id = ? AND status = 'pending'",
+            (ticket_id, user_id),
+        ).rowcount
+        self.conn.commit()
+        if claimed != 1:
+            if self._ticket_row(user_id, ticket_id) is None:
+                raise KeyError(ticket_id)
+            raise ValueError("ticket is not pending")
+        try:
+            self._send_claimed(user_id, ticket_id, now)
+        finally:
+            # A failure that set no final status leaves the ticket retryable with the same order id.
+            self.conn.execute(
+                "UPDATE live_tickets SET status = 'pending' WHERE id = ? AND status = 'sending'",
+                (ticket_id,),
+            )
+            self.conn.commit()
+
+    def _send_claimed(self, user_id: str, ticket_id: str, now: datetime) -> None:
         ticket = self._ticket_row(user_id, ticket_id)
         if ticket is None:
             raise KeyError(ticket_id)
@@ -424,6 +521,7 @@ class LiveBook:
             self.conn.execute("UPDATE live_tickets SET status = 'halted' WHERE id = ?", (ticket_id,))
             self.halt(user_id, "unexpected position", now)
             raise ValueError("unexpected position")
+        self._mark_pnl(user_id, view.equity, now)
         ctx = self._context(user_id, now, view, str(ticket["model"]))
         intent = OrderIntent(
             symbol=str(ticket["symbol"]),
@@ -506,6 +604,7 @@ class LiveBook:
             orders_today=self._orders_today(user_id, now),
             orders_last_minute=self._orders_last_minute(user_id, model, now),
             settled_cash=settled,
+            open_buys=self._open_buys(user_id, now),
             now=now,
             allowlist=ALLOWLIST,
         )
@@ -547,6 +646,17 @@ class LiveBook:
         ).fetchone()
         return int(row["n"]) if row is not None else 0
 
+    def _open_buys(self, user_id: str, now: datetime) -> float:
+        """Buy orders still working today. Orders are DAY orders, so earlier ones have expired or filled."""
+        local = now.astimezone(NY)
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(qty * limit_price), 0) AS total FROM live_orders
+            WHERE user_id = ? AND side = 'BUY' AND status IN ('submitted', 'open') AND created_at >= ?""",
+            (user_id, start.isoformat()),
+        ).fetchone()
+        return float(row["total"]) if row is not None else 0.0
+
     def _unsettled_sells(self, user_id: str, now: datetime) -> float:
         rows = self.conn.execute(
             """SELECT qty, limit_price, created_at FROM live_orders
@@ -570,7 +680,7 @@ class LiveBook:
             return True
         ticket = self.conn.execute(
             """SELECT id FROM live_tickets
-            WHERE user_id = ? AND symbol = ? AND side = ? AND status = 'pending'""",
+            WHERE user_id = ? AND symbol = ? AND side = ? AND status IN ('pending', 'sending')""",
             (user_id, symbol, side),
         ).fetchone()
         return ticket is not None

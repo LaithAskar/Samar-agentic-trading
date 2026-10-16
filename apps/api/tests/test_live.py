@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -9,12 +11,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from samar_api.app import create_app
+from samar_api.live import book as book_module
 from samar_api.live.book import LiveBook
 from samar_api.live.limits import ALLOWLIST, AUTO_PHRASE, ENABLE_PHRASE, evaluate, sell_proceeds_unsettled, whole_shares
 from samar_api.live.signal import strategy_intent
 from samar_api.live.types import GuardContext, Held, Limits, OrderIntent, SourceChoice
 from samar_api.service import AppState
-from samar_data.market import MemoryMarketData
+from samar_data.market import REAL_DATA, MemoryMarketData
 from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec
 from samar_worker.__main__ import cycle_once
@@ -39,8 +42,7 @@ PLACE = {
 }
 
 
-def _bars() -> list[Bar]:
-    start = datetime(2024, 1, 2, tzinfo=UTC)
+def _bars(start: datetime = datetime(2024, 1, 2, tzinfo=UTC)) -> list[Bar]:
     return [
         Bar(
             symbol="AAPL",
@@ -53,6 +55,35 @@ def _bars() -> list[Bar]:
         )
         for index in range(3)
     ]
+
+
+class RealMarket(MemoryMarketData):
+    """Stands in for a local cache of real daily bars."""
+
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        del tickers
+        return REAL_DATA
+
+
+def _current_bars() -> list[Bar]:
+    return _bars(OPEN - timedelta(days=3))
+
+
+ALWAYS_BUY = {
+    "name": "always",
+    "universe": ["AAPL"],
+    "rules": [
+        {
+            "when": {
+                "kind": "compare",
+                "left": {"kind": "indicator", "name": "price", "ticker": "AAPL"},
+                "op": ">",
+                "right": {"kind": "const", "value": 0},
+            },
+            "then": {"kind": "buy", "ticker": "AAPL", "amount": {"kind": "shares", "value": 100}},
+        }
+    ],
+}
 
 
 class Script:
@@ -124,17 +155,21 @@ class Script:
         return [url for method, url, _body in self.calls if method == "DELETE"]
 
 
-def _state(script: Script) -> AppState:
+def _state(script: Script, path: str = ":memory:") -> AppState:
     return AppState(
-        ":memory:",
+        path,
         MemoryMarketData({"AAPL": _bars()}),
         kek=b"k" * 32,
         http=httpx.Client(transport=httpx.MockTransport(script)),
     )
 
 
-def _session(script: Script) -> tuple[TestClient, AppState, str, LiveBook]:
-    state = _state(script)
+def _session(
+    script: Script, path: str = ":memory:", market: MemoryMarketData | None = None
+) -> tuple[TestClient, AppState, str, LiveBook]:
+    state = _state(script, path)
+    if market is not None:
+        state.market = market
     client = TestClient(create_app(state))
     registered = client.post("/auth/register", json={"email": "demo@example.com", "password": "demo-password-1"})
     assert registered.status_code == 200
@@ -408,7 +443,7 @@ def test_strategy_sizes_to_the_per_order_cap() -> None:
     assert intent.quantity == 10
     assert intent.limit_price == 20
     script = Script()
-    _client, state, user_id, book = _session(script)
+    _client, state, user_id, book = _session(script, market=RealMarket({"AAPL": _current_bars()}))
     created = state.create_strategy(user_id, spec)
     _arm(book, user_id)
     book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
@@ -629,3 +664,199 @@ def test_live_routes_require_the_phrases() -> None:
     assert "DELETE FROM live_audit" not in open("apps/api/src/samar_api/live/book.py", encoding="utf-8").read()
     _ = uuid.UUID(ORDER_ID)
     _ = Held(symbol="AAPL", quantity=1)
+
+
+def test_capital_cap_totals_exposure_across_buys() -> None:
+    script = Script()
+    script.buying_power = "2000.00"
+    script.equity = "2000.00"
+    _client, _state, user_id, book = _session(script)
+    _arm(book, user_id)
+    book.set_limits(user_id, Limits(capital_cap=200, max_order_dollars=200, max_orders_per_day=None), OPEN)
+    symbols = ["AAPL", "F", "T", "KO", "PFE", "INTC"]
+    for index, symbol in enumerate(symbols):
+        intent = OrderIntent(symbol=symbol, side="BUY", quantity=9, limit_price=20, reason="fill", model=f"m{index}")
+        book.run_cycle(user_id, OPEN + timedelta(seconds=70 * index), lambda intent=intent: intent)
+    bodies = [json.loads(body) for body in script.places]
+    spent = sum(int(body["quantity"]) * float(body["limitPrice"]) for body in bodies)
+    assert spent <= 200
+    assert len(bodies) == 1
+    assert any(row.detail == "order exceeds the capital cap" for row in book.audit(user_id))
+
+
+def test_held_positions_count_against_the_capital_cap() -> None:
+    script = Script()
+    script.positions = [{"instrument": {"symbol": "AAPL", "type": "EQUITY"}, "quantity": "5", "currentValue": "150.00"}]
+    _client, _state, user_id, book = _session(script)
+    _arm(book, user_id)
+    over = OrderIntent(symbol="F", side="BUY", quantity=3, limit_price=20, reason="over", model="script")
+    assert book.run_cycle(user_id, OPEN, lambda: over) == 0
+    assert script.places == []
+    under = OrderIntent(symbol="F", side="BUY", quantity=2, limit_price=20, reason="under", model="script")
+    assert book.run_cycle(user_id, OPEN + timedelta(minutes=1), lambda: under) == 1
+    script.positions = [{"instrument": {"symbol": "AAPL", "type": "EQUITY"}, "quantity": "5", "currentValue": "n/a"}]
+    small = OrderIntent(symbol="T", side="BUY", quantity=1, limit_price=1, reason="small", model="script")
+    assert book.run_cycle(user_id, OPEN + timedelta(minutes=2), lambda: small) == 0
+    assert any(row.detail == "position value is unknown" for row in book.audit(user_id))
+    capital = Limits(capital_cap=200, max_order_dollars=200)
+    ctx = _ok_ctx().model_copy(update={"limits": capital, "buying_power": 1000})
+    held = (Held(symbol="AAPL", quantity=5, market_value=150),)
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": held})).ok is True
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": held, "open_buys": 40})).reason == (
+        "order exceeds the capital cap"
+    )
+    unknown = (Held(symbol="AAPL", quantity=5),)
+    assert evaluate(_ok_intent(), ctx.model_copy(update={"positions": unknown})).reason == "position value is unknown"
+    sell = _ok_intent().model_copy(update={"side": "SELL", "quantity": 5})
+    assert evaluate(sell, ctx.model_copy(update={"positions": unknown, "open_buys": 500})).ok is True
+
+
+def _pace_evaluate(monkeypatch: pytest.MonkeyPatch, parties: int) -> None:
+    """Hold the first guard checks until every racer has reached one."""
+    real = book_module.evaluate
+    gate = threading.Barrier(parties, timeout=2)
+    lock = threading.Lock()
+    seen = [0]
+
+    def paced(intent: OrderIntent, ctx: GuardContext) -> object:
+        with lock:
+            seen[0] += 1
+            wait = seen[0] <= parties
+        if wait:
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:
+                pass
+        return real(intent, ctx)
+
+    monkeypatch.setattr(book_module, "evaluate", paced)
+
+
+def _race(*jobs: Callable[[], object]) -> list[object]:
+    results: list[object] = [None] * len(jobs)
+
+    def run(index: int, job: Callable[[], object]) -> None:
+        try:
+            results[index] = job()
+        except Exception as exc:
+            results[index] = exc
+
+    threads = [threading.Thread(target=run, args=(index, job)) for index, job in enumerate(jobs)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    return results
+
+
+def test_worker_and_check_cannot_send_the_same_order_twice(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = Script()
+    path = str(tmp_path) + "/live.db"
+    _client, state, user_id, api_book = _session(script, path)
+    _arm(api_book, user_id)
+    worker = _state(script, path)
+    worker_book = LiveBook(worker.conn, worker.http, worker.read_key, worker.market)
+    _pace_evaluate(monkeypatch, 2)
+    results = _race(
+        lambda: worker_book.run_cycle(user_id, OPEN, _ok_intent),
+        lambda: api_book.run_cycle(user_id, OPEN, _ok_intent),
+    )
+    assert sorted(str(result) for result in results) == ["0", "1"]
+    assert len(script.places) == 1
+    tickets = state.conn.execute("SELECT status FROM live_tickets WHERE user_id = ?", (user_id,)).fetchall()
+    assert [row["status"] for row in tickets] == ["sent"]
+
+
+def test_two_approvals_of_one_ticket_send_once(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    script = Script()
+    path = str(tmp_path) + "/live.db"
+    _client, state, user_id, book = _session(script, path)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    second = _state(script, path)
+    other = LiveBook(second.conn, second.http, second.read_key, second.market)
+    _pace_evaluate(monkeypatch, 2)
+    results = _race(lambda: book.approve(user_id, ticket.id, OPEN), lambda: other.approve(user_id, ticket.id, OPEN))
+    assert len(script.places) == 1
+    assert sum(1 for result in results if isinstance(result, ValueError)) == 1
+
+
+def test_a_second_ticket_for_a_working_order_is_refused() -> None:
+    script = Script()
+    _client, _state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    book.propose(user_id, _ok_intent(), OPEN)
+    with pytest.raises(ValueError, match="AAPL BUY is already working"):
+        book.propose(user_id, _ok_intent(), OPEN)
+
+
+def test_daily_loss_stop_fires_in_approve_each_mode() -> None:
+    script = Script()
+    script.buying_power = "2500.00"
+    script.equity = "2000.00"
+    _client, _state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    first = book.propose(user_id, _ok_intent(), OPEN)
+    assert book.approve(user_id, first.id, OPEN).status == "sent"
+    script.equity = "1000.00"
+    later = OPEN + timedelta(minutes=30)
+    ford = book.propose(user_id, _ok_intent().model_copy(update={"symbol": "F"}), later)
+    with pytest.raises(ValueError, match="daily loss stop is hit"):
+        book.approve(user_id, ford.id, later)
+    assert len(script.places) == 1
+    status = book.status(user_id)
+    assert status.enabled is False
+    assert status.halted_reason == "daily loss stop is hit"
+
+
+def _strategy_on(state: AppState, book: LiveBook, user_id: str) -> None:
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    state.conn.execute(
+        "UPDATE live_settings SET source = 'strategy', strategy_id = ? WHERE user_id = ?",
+        (created.id, user_id),
+    )
+    state.conn.commit()
+
+
+def test_live_strategy_refuses_synthetic_price_data() -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script)
+    _arm(book, user_id)
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    with pytest.raises(ValueError, match="price data for AAPL is not real"):
+        book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
+    _strategy_on(state, book, user_id)
+    assert book.run_cycle(user_id, OPEN, None) == 0
+    assert script.places == []
+    assert any(row.action == "data_refused" for row in book.audit(user_id))
+
+
+def test_live_strategy_refuses_stale_price_data() -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script, market=RealMarket({"AAPL": _bars()}))
+    _arm(book, user_id)
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    with pytest.raises(ValueError, match="price data for AAPL is stale"):
+        book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
+    _strategy_on(state, book, user_id)
+    assert book.run_cycle(user_id, OPEN, None) == 0
+    assert script.places == []
+
+
+def test_one_failing_user_does_not_stop_the_other_cycles() -> None:
+    script = Script()
+    client, state, broken, book = _session(script)
+    _arm(book, broken)
+    registered = client.post("/auth/register", json={"email": "other@example.com", "password": "demo-password-2"})
+    assert registered.status_code == 200
+    healthy = state.user_from_authorization(f"Bearer {registered.json()['token']}").id
+    state.save_key(healthy, "public_com", PUBLIC, True)
+    state.save_key(healthy, "openai", MODEL_KEY, True)
+    _arm(book, healthy)
+    book.set_source(healthy, SourceChoice(source="model", provider="openai", model="gpt-4o-mini"), OPEN)
+    state.delete_key(broken, "public_com")
+    assert book.run_due(OPEN) == 1
+    assert len(script.places) == 1
+    assert any(row.action == "cycle_error" for row in book.audit(broken))
+    assert book.status(broken).enabled is False
+    assert book.status(broken).halted_reason == "cycle error"

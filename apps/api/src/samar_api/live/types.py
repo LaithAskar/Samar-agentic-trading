@@ -23,6 +23,7 @@ class Held(BaseModel):
     symbol: str
     quantity: float
     instrument_type: str = "EQUITY"
+    market_value: float | None = None
 
 
 class OrderIntent(BaseModel):
@@ -48,6 +49,7 @@ class GuardContext(BaseModel):
     orders_today: int = 0
     orders_last_minute: int = 0
     settled_cash: float | None = None
+    open_buys: float = 0.0
     now: datetime
     allowlist: frozenset[str] = Field(default_factory=frozenset)
 
