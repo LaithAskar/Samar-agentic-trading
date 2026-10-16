@@ -9,3 +9,4 @@
 | A response model must not grow a secret field. | `test_secret_status_schema_has_no_secret_field` |
 | The capital cap is total buy exposure, not one order. | `test_capital_cap_totals_exposure_across_buys` |
 | The worker and /live/check must not send one order twice. | `test_worker_and_check_cannot_send_the_same_order_twice` |
+| The daily loss stop is marked before every send, not only in auto mode. | `test_daily_loss_stop_fires_in_approve_each_mode` |

@@ -466,6 +466,7 @@ class LiveBook:
             self.conn.execute("UPDATE live_tickets SET status = 'halted' WHERE id = ?", (ticket_id,))
             self.halt(user_id, "unexpected position", now)
             raise ValueError("unexpected position")
+        self._mark_pnl(user_id, view.equity, now)
         ctx = self._context(user_id, now, view, str(ticket["model"]))
         intent = OrderIntent(
             symbol=str(ticket["symbol"]),

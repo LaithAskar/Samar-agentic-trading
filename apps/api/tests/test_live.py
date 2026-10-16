@@ -756,3 +756,22 @@ def test_a_second_ticket_for_a_working_order_is_refused() -> None:
     book.propose(user_id, _ok_intent(), OPEN)
     with pytest.raises(ValueError, match="AAPL BUY is already working"):
         book.propose(user_id, _ok_intent(), OPEN)
+
+
+def test_daily_loss_stop_fires_in_approve_each_mode() -> None:
+    script = Script()
+    script.buying_power = "2500.00"
+    script.equity = "2000.00"
+    _client, _state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    first = book.propose(user_id, _ok_intent(), OPEN)
+    assert book.approve(user_id, first.id, OPEN).status == "sent"
+    script.equity = "1000.00"
+    later = OPEN + timedelta(minutes=30)
+    ford = book.propose(user_id, _ok_intent().model_copy(update={"symbol": "F"}), later)
+    with pytest.raises(ValueError, match="daily loss stop is hit"):
+        book.approve(user_id, ford.id, later)
+    assert len(script.places) == 1
+    status = book.status(user_id)
+    assert status.enabled is False
+    assert status.halted_reason == "daily loss stop is hit"
