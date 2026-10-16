@@ -17,7 +17,7 @@ from samar_api.live.limits import ALLOWLIST, AUTO_PHRASE, ENABLE_PHRASE, evaluat
 from samar_api.live.signal import strategy_intent
 from samar_api.live.types import GuardContext, Held, Limits, OrderIntent, SourceChoice
 from samar_api.service import AppState
-from samar_data.market import MemoryMarketData
+from samar_data.market import REAL_DATA, MemoryMarketData
 from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec
 from samar_worker.__main__ import cycle_once
@@ -42,8 +42,7 @@ PLACE = {
 }
 
 
-def _bars() -> list[Bar]:
-    start = datetime(2024, 1, 2, tzinfo=UTC)
+def _bars(start: datetime = datetime(2024, 1, 2, tzinfo=UTC)) -> list[Bar]:
     return [
         Bar(
             symbol="AAPL",
@@ -56,6 +55,35 @@ def _bars() -> list[Bar]:
         )
         for index in range(3)
     ]
+
+
+class RealMarket(MemoryMarketData):
+    """Stands in for a local cache of real daily bars."""
+
+    def data_label(self, tickers: tuple[str, ...]) -> str:
+        del tickers
+        return REAL_DATA
+
+
+def _current_bars() -> list[Bar]:
+    return _bars(OPEN - timedelta(days=3))
+
+
+ALWAYS_BUY = {
+    "name": "always",
+    "universe": ["AAPL"],
+    "rules": [
+        {
+            "when": {
+                "kind": "compare",
+                "left": {"kind": "indicator", "name": "price", "ticker": "AAPL"},
+                "op": ">",
+                "right": {"kind": "const", "value": 0},
+            },
+            "then": {"kind": "buy", "ticker": "AAPL", "amount": {"kind": "shares", "value": 100}},
+        }
+    ],
+}
 
 
 class Script:
@@ -136,8 +164,12 @@ def _state(script: Script, path: str = ":memory:") -> AppState:
     )
 
 
-def _session(script: Script, path: str = ":memory:") -> tuple[TestClient, AppState, str, LiveBook]:
+def _session(
+    script: Script, path: str = ":memory:", market: MemoryMarketData | None = None
+) -> tuple[TestClient, AppState, str, LiveBook]:
     state = _state(script, path)
+    if market is not None:
+        state.market = market
     client = TestClient(create_app(state))
     registered = client.post("/auth/register", json={"email": "demo@example.com", "password": "demo-password-1"})
     assert registered.status_code == 200
@@ -411,7 +443,7 @@ def test_strategy_sizes_to_the_per_order_cap() -> None:
     assert intent.quantity == 10
     assert intent.limit_price == 20
     script = Script()
-    _client, state, user_id, book = _session(script)
+    _client, state, user_id, book = _session(script, market=RealMarket({"AAPL": _current_bars()}))
     created = state.create_strategy(user_id, spec)
     _arm(book, user_id)
     book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
@@ -775,3 +807,56 @@ def test_daily_loss_stop_fires_in_approve_each_mode() -> None:
     status = book.status(user_id)
     assert status.enabled is False
     assert status.halted_reason == "daily loss stop is hit"
+
+
+def _strategy_on(state: AppState, book: LiveBook, user_id: str) -> None:
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    state.conn.execute(
+        "UPDATE live_settings SET source = 'strategy', strategy_id = ? WHERE user_id = ?",
+        (created.id, user_id),
+    )
+    state.conn.commit()
+
+
+def test_live_strategy_refuses_synthetic_price_data() -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script)
+    _arm(book, user_id)
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    with pytest.raises(ValueError, match="price data for AAPL is not real"):
+        book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
+    _strategy_on(state, book, user_id)
+    assert book.run_cycle(user_id, OPEN, None) == 0
+    assert script.places == []
+    assert any(row.action == "data_refused" for row in book.audit(user_id))
+
+
+def test_live_strategy_refuses_stale_price_data() -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script, market=RealMarket({"AAPL": _bars()}))
+    _arm(book, user_id)
+    created = state.create_strategy(user_id, StrategySpec.model_validate(ALWAYS_BUY))
+    with pytest.raises(ValueError, match="price data for AAPL is stale"):
+        book.set_source(user_id, SourceChoice(source="strategy", strategy_id=created.id), OPEN)
+    _strategy_on(state, book, user_id)
+    assert book.run_cycle(user_id, OPEN, None) == 0
+    assert script.places == []
+
+
+def test_one_failing_user_does_not_stop_the_other_cycles() -> None:
+    script = Script()
+    client, state, broken, book = _session(script)
+    _arm(book, broken)
+    registered = client.post("/auth/register", json={"email": "other@example.com", "password": "demo-password-2"})
+    assert registered.status_code == 200
+    healthy = state.user_from_authorization(f"Bearer {registered.json()['token']}").id
+    state.save_key(healthy, "public_com", PUBLIC, True)
+    state.save_key(healthy, "openai", MODEL_KEY, True)
+    _arm(book, healthy)
+    book.set_source(healthy, SourceChoice(source="model", provider="openai", model="gpt-4o-mini"), OPEN)
+    state.delete_key(broken, "public_com")
+    assert book.run_due(OPEN) == 1
+    assert len(script.places) == 1
+    assert any(row.action == "cycle_error" for row in book.audit(broken))
+    assert book.status(broken).enabled is False
+    assert book.status(broken).halted_reason == "cycle error"

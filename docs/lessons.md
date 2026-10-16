@@ -10,3 +10,4 @@
 | The capital cap is total buy exposure, not one order. | `test_capital_cap_totals_exposure_across_buys` |
 | The worker and /live/check must not send one order twice. | `test_worker_and_check_cannot_send_the_same_order_twice` |
 | The daily loss stop is marked before every send, not only in auto mode. | `test_daily_loss_stop_fires_in_approve_each_mode` |
+| Live strategy mode needs real, current bars, and one user's failed cycle must not stop the rest. | `test_live_strategy_refuses_synthetic_price_data`, `test_one_failing_user_does_not_stop_the_other_cycles` |

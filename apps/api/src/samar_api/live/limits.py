@@ -41,6 +41,7 @@ ENABLE_PHRASE = "I understand I can lose this money"
 AUTO_PHRASE = "auto trade while I am away"
 TICKET_MINUTES = 5
 REJECT_LIMIT = 3
+STALE_DAYS = 4
 
 
 def sell_proceeds_unsettled(sold_at: datetime, now: datetime) -> bool:
@@ -53,6 +54,14 @@ def sell_proceeds_unsettled(sold_at: datetime, now: datetime) -> bool:
         day += timedelta(days=1)
     settles = datetime(day.year, day.month, day.day, tzinfo=NY)
     return now < settles
+
+
+def bars_current(last_bar: datetime, now: datetime) -> bool:
+    """Daily bars are current when the last one is within a long weekend of today in New York."""
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    age = now.astimezone(NY).date() - last_bar.date()
+    return age.days <= STALE_DAYS
 
 
 def market_open(now: datetime) -> bool:
