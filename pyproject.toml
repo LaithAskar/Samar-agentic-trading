@@ -136,7 +136,8 @@ forbidden_modules = ["samar_worker"]
 name = "agent does not place brokerage orders"
 type = "forbidden"
 source_modules = ["samar_agent", "samar_worker"]
-forbidden_modules = ["samar_brokers.public_live"]
+forbidden_modules = ["samar_brokers.public_live", "samar_api.live"]
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "only secrets imports cryptography"

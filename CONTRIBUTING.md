@@ -1,6 +1,6 @@
 # Contributing
 
-Samar is a paper-trading practice app. It is not financial advice. Simulated fills stay inside Samar. A Public.com key is read-only. Do not add order placement.
+Samar is a paper-trading practice app with an optional live path. It is not financial advice. You can lose money. Simulated fills stay inside Samar. Order functions belong only in `apps/api/src/samar_api/live/`. Do not add `public_live.py`.
 
 ## Check
 

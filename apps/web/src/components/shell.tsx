@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Activity,
   BookOpen,
   FlaskConical,
   LayoutDashboard,
@@ -14,11 +15,13 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
+import type { LiveStatus } from "@/lib/contracts";
 
 import { SignIn } from "./sign-in";
 
 const links = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/live", label: "Live", icon: Activity },
   { href: "/strategies", label: "Strategies", icon: Shapes },
   { href: "/backtests", label: "Backtests", icon: FlaskConical },
   { href: "/assistant", label: "Assistant", icon: MessagesSquare },
@@ -31,6 +34,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const [session, setSession] = useState<"loading" | "out" | "in">("loading");
   const [email, setEmail] = useState("");
+  const [banner, setBanner] = useState<LiveStatus["banner"]>("paper");
 
   useEffect(() => {
     const token = sessionStorage.getItem("samar_token");
@@ -47,6 +51,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
         sessionStorage.removeItem("samar_token");
         setSession("out");
       });
+    const pull = () => {
+      api<LiveStatus>("/live/status")
+        .then((status) => setBanner(status.banner))
+        .catch(() => setBanner("paper"));
+    };
+    pull();
+    const timer = window.setInterval(pull, 5000);
+    return () => window.clearInterval(timer);
   }, []);
 
   if (session === "loading") {
@@ -71,8 +83,20 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen">
-      <p className="border-b border-line bg-surface px-4 py-2 text-center text-xs text-muted">
-        Simulated. Not investment advice. Paper fills stay on Samar. A linked brokerage is read-only.
+      <p
+        className={
+          banner === "auto"
+            ? "bg-loss px-4 py-2 text-center text-xs text-bg"
+            : banner === "live"
+              ? "border-b border-loss bg-surface px-4 py-2 text-center text-xs text-loss"
+              : "border-b border-line bg-surface px-4 py-2 text-center text-xs text-muted"
+        }
+      >
+        {banner === "auto"
+          ? "LIVE AUTO. A worker may send orders while this is on. You can lose money. Not investment advice."
+          : banner === "live"
+            ? "LIVE. Orders go to Public.com only after you approve a ticket. You can lose money. Not investment advice."
+            : "Paper. Live trading is off. Not investment advice."}
       </p>
       <div className="mx-auto flex max-w-page">
         <nav className="hidden w-52 shrink-0 border-r border-line p-4 md:block">

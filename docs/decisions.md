@@ -6,11 +6,11 @@ The plan calls for Supabase and a live RLS test. This environment has no local S
 
 ## Settings sync is a read
 
-`POST /broker/sync` opens the stored Public.com key, exchanges a short-lived token, and reads the first account's portfolio. The dashboard shows that snapshot beside the paper account. `scripts/check_no_orders.py` still fails the build if an order function appears.
+`POST /broker/sync` opens the stored Public.com key, exchanges a short-lived token, and reads the first account's portfolio. The dashboard shows that snapshot beside the paper account. Order methods are not on that client.
 
-## No order-placement module
+## Live orders stay in one module
 
-The plan sketches a later `PublicLive` type. The request for this build says there is no order-placement path at all. `scripts/check_no_orders.py` fails if `public_live.py` or an order function appears. Import-linter still forbids `agent` and `worker` from importing `samar_brokers.public_live`.
+Order placement exists only in `apps/api/src/samar_api/live/`. `scripts/check_no_orders.py` fails if `place_order`, `cancel_order`, `preflight`, or `replace_order` is defined anywhere else, and it fails if `public_live.py` appears. Import-linter forbids the agent and the worker from importing `samar_api.live` or `samar_brokers.public_live`. Live mode is off until the user types a confirmation. Auto mode needs a second confirmation. Both paths call `evaluate`. The worker loop calls `AppState.run_live_cycles` during market hours. A broker error, three rejections, an unexpected position, or the daily loss stop turns live mode off and cancels orders Samar recorded.
 
 ## Default slippage is 5 bps
 

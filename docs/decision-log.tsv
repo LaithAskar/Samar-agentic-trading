@@ -18,3 +18,5 @@ ts	phase	decision	why	evidence	result
 2026-10-14T15:50:00Z	m10	saved choice picks the provider	several model keys need an explicit selection	test_openai_choice_posts_chat_completions	kept
 2026-10-14T16:30:00Z	sec	refuse the public development KEK outside dev	an unset key must not encrypt a production database	test_production_refuses_a_missing_kek	kept
 2026-10-15T04:30:00Z	arena	rank by held-out deflated Sharpe	train performance overfits the search window	test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent	kept
+2026-10-15T18:40:00Z	live	orders only behind evaluate	a class-time auto mode still has to refuse the same limits	test_each_limit_rejects_with_its_reason	kept
+2026-10-15T23:20:00Z	live	unlimited daily orders still settle T+1	a cash sale cannot fund a same-day rebuy	test_unsettled_sale_cannot_fund_a_rebuy	kept

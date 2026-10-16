@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
@@ -13,6 +14,8 @@ from samar_contracts.models import SecretStatus
 from samar_engine.dsl import StrategySpec
 
 from samar_api.auth import supabase_configured
+from samar_api.live.book import LiveBook
+from samar_api.live.types import Limits, OrderIntent, SourceChoice
 from samar_api.service import AppState
 
 _SHAPES: dict[str, re.Pattern[str]] = {
@@ -70,6 +73,34 @@ class ArenaBody(BaseModel):
     contestants: list[ArenaContestantBody]
     budget_proposals: int = 4
     token_cap: int = 8000
+
+
+class PhraseBody(BaseModel):
+    phrase: str
+
+
+class LimitsBody(BaseModel):
+    capital_cap: float = 200
+    max_order_dollars: float = 200
+    max_orders_per_day: int | None = 4
+    max_orders_per_minute: int = 2
+    daily_loss_stop: float = 50
+
+
+class SourceBody(BaseModel):
+    source: str
+    strategy_id: str = ""
+    provider: str = ""
+    model: str = ""
+
+
+class TicketBody(BaseModel):
+    symbol: str
+    side: str
+    quantity: int
+    limit_price: float
+    reason: str
+    model: str = "manual"
 
 
 def validate_key(kind: str, key: str) -> bool:
@@ -318,5 +349,120 @@ def create_app(state: AppState | None = None) -> FastAPI:
     def broker_snapshot(authorization: str | None = Header(default=None)) -> dict[str, object] | None:
         view = samar().broker_snapshot(require_user(authorization))
         return None if view is None else view.model_dump()
+
+    def live_book() -> LiveBook:
+        state = samar()
+        return LiveBook(state.conn, state.http, state.read_key, state.market)
+
+    @app.get("/live/status")
+    def live_status(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        return live_book().status(require_user(authorization)).model_dump()
+
+    @app.get("/live/audit")
+    def live_audit(authorization: str | None = Header(default=None)) -> list[dict[str, object]]:
+        rows = live_book().audit(require_user(authorization))
+        return [row.model_dump() for row in rows]
+
+    @app.post("/live/enable")
+    def live_enable(body: PhraseBody, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            view = live_book().enable(require_user(authorization), body.phrase, datetime.now(UTC))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.post("/live/auto")
+    def live_auto(body: PhraseBody, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            view = live_book().enable_auto(require_user(authorization), body.phrase, datetime.now(UTC))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.post("/live/manual")
+    def live_manual(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        return live_book().manual(require_user(authorization), datetime.now(UTC)).model_dump()
+
+    @app.post("/live/disable")
+    def live_disable(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        return live_book().disable(require_user(authorization), datetime.now(UTC)).model_dump()
+
+    @app.post("/live/kill")
+    def live_kill(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        return live_book().kill(require_user(authorization), datetime.now(UTC)).model_dump()
+
+    @app.put("/live/limits")
+    def live_limits(body: LimitsBody, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            view = live_book().set_limits(
+                require_user(authorization),
+                Limits(
+                    capital_cap=body.capital_cap,
+                    max_order_dollars=body.max_order_dollars,
+                    max_orders_per_day=body.max_orders_per_day,
+                    max_orders_per_minute=body.max_orders_per_minute,
+                    daily_loss_stop=body.daily_loss_stop,
+                ),
+                datetime.now(UTC),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.put("/live/source")
+    def live_source(body: SourceBody, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        if body.source not in {"off", "strategy", "model"}:
+            raise HTTPException(422, "source must be off, strategy, or model")
+        try:
+            view = live_book().set_source(
+                require_user(authorization),
+                SourceChoice(
+                    source="strategy" if body.source == "strategy" else "model" if body.source == "model" else "off",
+                    strategy_id=body.strategy_id,
+                    provider=body.provider,
+                    model=body.model,
+                ),
+                datetime.now(UTC),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.post("/live/tickets")
+    def live_ticket(body: TicketBody, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        if body.side not in {"BUY", "SELL"}:
+            raise HTTPException(422, "side must be BUY or SELL")
+        try:
+            view = live_book().propose(
+                require_user(authorization),
+                OrderIntent(
+                    symbol=body.symbol,
+                    side="BUY" if body.side == "BUY" else "SELL",
+                    quantity=body.quantity,
+                    limit_price=body.limit_price,
+                    reason=body.reason,
+                    model=body.model,
+                ),
+                datetime.now(UTC),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.post("/live/tickets/{ticket_id}/approve")
+    def live_approve(ticket_id: str, authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            view = live_book().approve(require_user(authorization), ticket_id, datetime.now(UTC))
+        except KeyError as exc:
+            raise HTTPException(404, "ticket not found") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return view.model_dump()
+
+    @app.post("/live/check")
+    def live_check(authorization: str | None = Header(default=None)) -> dict[str, int]:
+        user_id = require_user(authorization)
+        placed = live_book().run_cycle(user_id, datetime.now(UTC), None)
+        return {"placed": placed}
 
     return app

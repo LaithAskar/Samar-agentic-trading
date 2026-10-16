@@ -120,6 +120,64 @@ CREATE TABLE IF NOT EXISTS arena_runs (
   error TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS live_settings (
+  user_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'approve',
+  capital_cap REAL NOT NULL DEFAULT 200,
+  max_order_dollars REAL NOT NULL DEFAULT 200,
+  max_orders_per_day INTEGER DEFAULT 4,
+  max_orders_per_minute INTEGER NOT NULL DEFAULT 2,
+  daily_loss_stop REAL NOT NULL DEFAULT 50,
+  permission TEXT NOT NULL DEFAULT 'unknown',
+  source TEXT NOT NULL DEFAULT 'off',
+  strategy_id TEXT NOT NULL DEFAULT '',
+  model_provider TEXT NOT NULL DEFAULT '',
+  model_name TEXT NOT NULL DEFAULT '',
+  reject_streak INTEGER NOT NULL DEFAULT 0,
+  halted_reason TEXT NOT NULL DEFAULT '',
+  day_pnl REAL NOT NULL DEFAULT 0,
+  day_key TEXT NOT NULL DEFAULT '',
+  day_start_equity REAL,
+  buying_power REAL,
+  settled_cash REAL,
+  account_id TEXT NOT NULL DEFAULT '',
+  positions_json TEXT NOT NULL DEFAULT '[]',
+  equity REAL
+);
+CREATE TABLE IF NOT EXISTS live_tickets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  limit_price REAL NOT NULL,
+  est_cost REAL NOT NULL,
+  reason TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  order_id TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_orders (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  limit_price REAL NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_audit (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  at TEXT NOT NULL,
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS arena_entries (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
@@ -152,7 +210,68 @@ def connect(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate_live_settings(conn)
     return conn
+
+
+def _migrate_live_settings(conn: sqlite3.Connection) -> None:
+    info = list(conn.execute("PRAGMA table_info(live_settings)"))
+    if not info:
+        return
+    names = {str(row["name"]) for row in info}
+    if "max_orders_per_minute" not in names:
+        conn.execute("ALTER TABLE live_settings ADD COLUMN max_orders_per_minute INTEGER NOT NULL DEFAULT 2")
+    if "settled_cash" not in names:
+        conn.execute("ALTER TABLE live_settings ADD COLUMN settled_cash REAL")
+    info = list(conn.execute("PRAGMA table_info(live_settings)"))
+    cap = next(row for row in info if row["name"] == "max_orders_per_day")
+    if int(cap["notnull"]) == 0:
+        conn.commit()
+        return
+    conn.execute("ALTER TABLE live_settings RENAME TO live_settings_old")
+    conn.executescript(
+        """
+        CREATE TABLE live_settings (
+          user_id TEXT PRIMARY KEY,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          mode TEXT NOT NULL DEFAULT 'approve',
+          capital_cap REAL NOT NULL DEFAULT 200,
+          max_order_dollars REAL NOT NULL DEFAULT 200,
+          max_orders_per_day INTEGER DEFAULT 4,
+          max_orders_per_minute INTEGER NOT NULL DEFAULT 2,
+          daily_loss_stop REAL NOT NULL DEFAULT 50,
+          permission TEXT NOT NULL DEFAULT 'unknown',
+          source TEXT NOT NULL DEFAULT 'off',
+          strategy_id TEXT NOT NULL DEFAULT '',
+          model_provider TEXT NOT NULL DEFAULT '',
+          model_name TEXT NOT NULL DEFAULT '',
+          reject_streak INTEGER NOT NULL DEFAULT 0,
+          halted_reason TEXT NOT NULL DEFAULT '',
+          day_pnl REAL NOT NULL DEFAULT 0,
+          day_key TEXT NOT NULL DEFAULT '',
+          day_start_equity REAL,
+          buying_power REAL,
+          settled_cash REAL,
+          account_id TEXT NOT NULL DEFAULT '',
+          positions_json TEXT NOT NULL DEFAULT '[]',
+          equity REAL
+        );
+        INSERT INTO live_settings (
+          user_id, enabled, mode, capital_cap, max_order_dollars, max_orders_per_day,
+          max_orders_per_minute, daily_loss_stop, permission, source, strategy_id,
+          model_provider, model_name, reject_streak, halted_reason, day_pnl, day_key,
+          day_start_equity, buying_power, settled_cash, account_id, positions_json, equity
+        )
+        SELECT
+          user_id, enabled, mode, capital_cap, max_order_dollars, max_orders_per_day,
+          max_orders_per_minute, daily_loss_stop, permission, source, strategy_id,
+          model_provider, model_name, reject_streak, halted_reason, day_pnl, day_key,
+          day_start_equity, buying_power, settled_cash, account_id, positions_json, equity
+        FROM live_settings_old;
+        DROP TABLE live_settings_old;
+        """
+    )
+    conn.commit()
 
 
 _USER_ROWS: dict[str, str] = {

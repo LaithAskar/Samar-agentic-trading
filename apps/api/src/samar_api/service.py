@@ -60,6 +60,7 @@ from samar_api.auth import (
     supabase_configured,
     token_hash,
 )
+from samar_api.live.book import LiveBook
 from samar_api.store import connect, rows_for_user
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
@@ -896,6 +897,9 @@ class AppState:
         )
         self.conn.commit()
         return view
+
+    def run_live_cycles(self, now: datetime) -> int:
+        return LiveBook(self.conn, self.http, self.read_key, self.market).run_due(now)
 
     def broker_snapshot(self, user_id: str) -> BrokerSnapshotView | None:
         row = self.conn.execute(

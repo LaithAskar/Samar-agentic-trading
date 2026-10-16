@@ -137,6 +137,66 @@ export type SessionView = {
   email: string;
 };
 
+export type LiveTicket = {
+  id: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  limit_price: number;
+  est_cost: number;
+  reason: string;
+  model: string;
+  status: string;
+  expires_at: string;
+};
+
+export type LiveOrder = {
+  id: string;
+  symbol: string;
+  side: string;
+  quantity: number;
+  limit_price: number;
+  status: string;
+};
+
+export type LiveAudit = {
+  id: string;
+  at: string;
+  action: string;
+  detail: string;
+};
+
+export type LivePosition = {
+  symbol: string;
+  quantity: number;
+  instrument_type: string;
+};
+
+export type LiveStatus = {
+  enabled: boolean;
+  mode: "approve" | "auto";
+  banner: "paper" | "live" | "auto";
+  permission: string;
+  capital_cap: number;
+  max_order_dollars: number;
+  max_orders_per_day: number | null;
+  max_orders_per_minute: number;
+  daily_loss_stop: number;
+  source: "off" | "strategy" | "model";
+  strategy_id: string;
+  model_provider: string;
+  model_name: string;
+  buying_power: number | null;
+  positions: LivePosition[];
+  tickets: LiveTicket[];
+  orders: LiveOrder[];
+  audit: LiveAudit[];
+  halted_reason: string;
+  reject_streak: number;
+  enable_phrase: string;
+  auto_phrase: string;
+};
+
 export function money(value: number): string {
   return value.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
