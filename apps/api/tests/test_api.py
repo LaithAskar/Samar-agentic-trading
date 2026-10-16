@@ -475,33 +475,32 @@ def test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent() -> None:
     assert again.json()["id"] == run_id
     view = client.get(f"/arena/runs/{run_id}").json()
     assert [(row["contestant"], row["model"]) for row in view["entries"]] == [
-        ("baseline", "buy_and_hold"),
-        ("random", "random-search"),
-        ("baseline", "sma_20_50"),
         ("openai", "gpt-4o-mini"),
+        ("baseline", "sma_20_50"),
+        ("random", "random-search"),
+        ("baseline", "buy_and_hold"),
     ]
     assert [row["rank"] for row in view["entries"]] == [1, 2, 3, 4]
-    assert view["entries"][0]["deflated_sharpe"] == pytest.approx(1.7209413654152856)
-    assert view["entries"][1]["deflated_sharpe"] == pytest.approx(1.137386774856135)
-    assert view["entries"][1]["test_sharpe"] == pytest.approx(1.2250013508705628)
-    assert view["entries"][1]["turnover"] == 9
-    assert view["entries"][1]["fold_sharpes"] == pytest.approx([1.2538723990671223, 1.4601215586006129])
-    assert view["entries"][2]["deflated_sharpe"] == pytest.approx(0.9100933569244132)
-    assert view["entries"][2]["turnover"] == 3
-    openai = view["entries"][3]
-    assert openai["n_trials"] == 3
-    assert openai["n_failures"] == 2
-    assert openai["tokens_in"] == 4
-    assert openai["tokens_out"] == 6
-    assert openai["test_sharpe"] == pytest.approx(0.9207573616900966)
-    assert openai["test_sharpe_se"] == pytest.approx(0.0533114424800895)
-    assert openai["test_max_drawdown_pct"] == pytest.approx(15.85345576145587)
-    assert openai["turnover"] == 8
-    assert openai["deflated_sharpe"] == pytest.approx(0.8417336075256059)
-    assert openai["fold_sharpes"] == pytest.approx([1.3178701104029293, 1.069308906048423])
+    assert view["entries"][0]["deflated_sharpe"] == pytest.approx(-0.06641122774977888)
+    assert view["entries"][0]["test_sharpe"] == pytest.approx(-0.0014078734738393864)
+    assert view["entries"][0]["test_sharpe_se"] == pytest.approx(0.043852922695639444)
+    assert view["entries"][0]["test_max_drawdown_pct"] == pytest.approx(19.627544429609667)
+    assert view["entries"][0]["turnover"] == 9
+    assert view["entries"][0]["fold_sharpes"] == pytest.approx([0.9267402396015714, -0.5623460417286588])
+    assert view["entries"][0]["n_trials"] == 3
+    assert view["entries"][0]["n_failures"] == 2
+    assert view["entries"][0]["tokens_in"] == 4
+    assert view["entries"][0]["tokens_out"] == 6
+    assert view["entries"][1]["deflated_sharpe"] == pytest.approx(-0.09826321406235547)
+    assert view["entries"][1]["turnover"] == 4
+    assert view["entries"][2]["deflated_sharpe"] == pytest.approx(-0.1634232596783104)
+    assert view["entries"][2]["test_sharpe"] == pytest.approx(-0.09826321406235547)
+    assert view["entries"][2]["turnover"] == 4
+    assert view["entries"][2]["fold_sharpes"] == pytest.approx([1.2613941186664213, -0.927011493162725])
+    openai = view["entries"][0]
     assert openai["proposals"][0]["ok"] is False
     assert openai["proposals"][1]["spec_name"] == "sma_cross"
-    assert openai["proposals"][1]["train_sharpe"] == pytest.approx(-0.044598, abs=1e-5)
+    assert openai["proposals"][1]["train_sharpe"] == pytest.approx(-1.145481, abs=1e-5)
     assert "Historical backtest on a small sample. Not a prediction." in openai["skepticism"]["warnings"]
     assert client.get("/strategies").json() == []
     assert str(seen[0].url) == "https://api.openai.com/v1/chat/completions"

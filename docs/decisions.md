@@ -18,7 +18,11 @@ The ported engine constructor defaulted to 0. The documented fill contract, and 
 
 ## Frozen bars replaced the README's AAPL sample
 
-`ai-trading-agent` README reports SMA 20/50 on AAPL 2020–2024 as 99.71% return, 14.86% CAGR, 71.43% win rate, Sharpe 0.89, p-value 0.0464. A Yahoo chart pull on 2026-10-14, saved as `packages/data/src/samar_data/fixtures/AAPL.csv`, produces 111.63% return, 16.19% CAGR, 46.15% win rate, Sharpe 0.84, p-value 0.0596, 13 round trips. Buy-and-hold of AAPL over the same bars is 236.76%, so the strategy still loses to holding the stock. The test locks the fixture, not the README, because the vendor history moved.
+`ai-trading-agent` README reports SMA 20/50 on AAPL 2020–2024 as 99.71% return, 14.86% CAGR, 71.43% win rate, Sharpe 0.89, p-value 0.0464. A Yahoo chart pull on 2026-10-14 produced 111.63% return, 16.19% CAGR, 46.15% win rate, Sharpe 0.84, p-value 0.0596, 13 round trips. Buy-and-hold of those bars was 236.76%. That pull is not in the repository.
+
+## Committed bars are a seeded series
+
+Yahoo Finance says not to redistribute information it provides. The files under `packages/data/src/samar_data/fixtures/` are the output of `scripts/write_price_fixtures.py`. On that AAPL series the same SMA 20/50 rule returns -22.14%, CAGR -4.89%, win rate 33.33%, Sharpe -0.35, p-value 0.4215, 12 round trips. Buy-and-hold is -46.32%. `test_sma_cross_aapl_2020_2024_frozen_fixture` locks those numbers.
 
 ## Skepticism compares to holding the traded ticker
 

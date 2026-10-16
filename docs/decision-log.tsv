@@ -20,3 +20,4 @@ ts	phase	decision	why	evidence	result
 2026-10-15T04:30:00Z	arena	rank by held-out deflated Sharpe	train performance overfits the search window	test_arena_ranks_held_out_deflated_sharpe_and_is_idempotent	kept
 2026-10-15T18:40:00Z	live	orders only behind evaluate	a class-time auto mode still has to refuse the same limits	test_each_limit_rejects_with_its_reason	kept
 2026-10-15T23:20:00Z	live	unlimited daily orders still settle T+1	a cash sale cannot fund a same-day rebuy	test_unsettled_sale_cannot_fund_a_rebuy	kept
+2026-10-16T02:50:00Z	data	track packages/data and ship a seeded series	a bare data/ ignore hid the workspace member, and Yahoo bars cannot be redistributed	test_fixture_slice_is_frozen	kept

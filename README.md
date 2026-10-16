@@ -16,7 +16,7 @@ uv run python -m samar_worker
 
 The site is [http://127.0.0.1:43123](http://127.0.0.1:43123). The API is [http://127.0.0.1:43124](http://127.0.0.1:43124). Create an account on the first screen. The session token stays in the browser tab. The worker is the process that keeps auto mode running after you close the browser. `SAMAR_WORKER_SECONDS` defaults to 60.
 
-`make verify` runs the lint, type, import boundary, secret scan, and behavior tests. That is the same command CI runs.
+`make verify` runs the lint, type, import boundary, secret scan, and behavior tests. That is the same command CI runs. `scripts/clean_clone_check.sh` clones HEAD into an empty directory and runs `uv sync --all-packages --group dev`, `pnpm install`, and `make verify` there, so a gitignore rule cannot hide a workspace member that the lockfile still names.
 
 Set `SAMAR_KEK` to 64 hex characters before anyone else can open the database. An empty value uses a fixed development key and prints a warning. Set `SAMAR_ENV` to `production`, or any name other than `dev`, `development`, `local`, or `test`, and a missing or development key stops the process. Set `SAMAR_SUPABASE_URL` and `SAMAR_SUPABASE_ANON_KEY` to check Supabase access tokens instead of the local account table.
 
@@ -73,11 +73,13 @@ flowchart LR
   live --> public["Public.com"]
 ```
 
-`packages/engine` is pure. It cannot import HTTP, the clock, or the market adapter. `packages/data` reads the frozen Yahoo chart CSVs. `apps/worker` claims one queued backtest and, when auto mode is on, runs one live cycle. It does not import the order client. `supabase/migrations/0001_init.sql` is the Postgres row-level security contract. The process you start locally uses sqlite. Live tables are sqlite only.
+`packages/engine` is pure. It cannot import HTTP, the clock, or the market adapter. `packages/data` reads the frozen CSVs under `packages/data/src/samar_data/fixtures/`. `apps/worker` claims one queued backtest and, when auto mode is on, runs one live cycle. It does not import the order client. `supabase/migrations/0001_init.sql` is the Postgres row-level security contract. The process you start locally uses sqlite. Live tables are sqlite only.
+
+The AAPL and SPY files are a seeded random walk written by `scripts/write_price_fixtures.py` (AAPL seed 20201014 starting at 100, SPY seed 20201015 starting at 300, weekdays from 2020-01-02 through 2024-12-31). They are original to this repository and covered by the MIT license. They are not a market-data vendor download. A local Yahoo chart pull was used while building the first backtest and is not in git. [Yahoo Finance says not to redistribute information it provides](https://help.yahoo.com/kb/SLN2310.html), and it attributes US equity history to Commodity Systems, Inc.
 
 ## What the tests lock
 
-The SMA 20/50 rule on the frozen AAPL file, 2020-01-02 through 2024-12-31, returns 111.63%, CAGR 16.19%, Sharpe 0.84, 13 round trips, p-value 0.0596. Buy-and-hold of those bars is 236.76%. A paper buy in the API test fills 9000 shares at 10.005 and marks the position at the last close, so equity is 99955.0. A second eval inserts 0. A mocked Public.com sync returns account `acc-1`, equity 1200.5, and 2 AAPL. The read paths are the token exchange, the account list, and the portfolio read. A mocked live buy of 1 AAPL at 20 posts the limit body with `useMargin` false, and a second approve of the same order id posts nothing.
+The SMA 20/50 rule on the frozen AAPL file, 2020-01-02 through 2024-12-31, returns -22.14%, CAGR -4.89%, Sharpe -0.35, 12 round trips, p-value 0.4215. Buy-and-hold of those bars is -46.32%. A paper buy in the API test fills 9000 shares at 10.005 and marks the position at the last close, so equity is 99955.0. A second eval inserts 0. A mocked Public.com sync returns account `acc-1`, equity 1200.5, and 2 AAPL. The read paths are the token exchange, the account list, and the portfolio read. A mocked live buy of 1 AAPL at 20 posts the limit body with `useMargin` false, and a second approve of the same order id posts nothing.
 
 ## Security
 

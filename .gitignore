@@ -20,7 +20,8 @@ credentials.json
 *.sqlite
 *.sqlite3
 .ipynb_checkpoints/
-data/
+# Local sqlite only. A leading slash so a source tree named data (packages/data) stays tracked.
+/data/
 artifacts/
 uploads/
 dist/
