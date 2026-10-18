@@ -341,7 +341,7 @@ class LiveBook:
 
     def run_due(self, now: datetime) -> int:
         rows = self.conn.execute(
-            "SELECT user_id FROM live_settings WHERE enabled = 1 AND mode = 'auto'",
+            "SELECT user_id FROM live_settings WHERE enabled = 1",
         ).fetchall()
         placed = 0
         for row in rows:
@@ -368,8 +368,9 @@ class LiveBook:
 
     def run_cycle(self, user_id: str, now: datetime, proposer: Proposer | None) -> int:
         row = self._settings(user_id)
-        if not row["enabled"] or row["mode"] != "auto":
+        if not row["enabled"]:
             return 0
+        self._expire(user_id, now)
         secret = self._public_secret(user_id)
         client = self._orders_client(secret, user_id)
         try:
@@ -391,6 +392,8 @@ class LiveBook:
             return 0
         if pnl <= -float(row["daily_loss_stop"]):
             self.halt(user_id, "daily loss stop is hit", now)
+            return 0
+        if row["mode"] != "auto":
             return 0
         intent = self._cycle_intent(user_id, view, proposer, now)
         if intent is None:
@@ -765,12 +768,13 @@ class LiveBook:
 
     def _expire(self, user_id: str, now: datetime) -> None:
         rows = self.conn.execute(
-            "SELECT id, expires_at FROM live_tickets WHERE user_id = ? AND status = 'pending'",
+            "SELECT id, status, expires_at FROM live_tickets WHERE user_id = ? AND status IN ('pending', 'sending')",
             (user_id,),
         ).fetchall()
         for row in rows:
             if _parse(str(row["expires_at"])) <= now:
-                self.conn.execute("UPDATE live_tickets SET status = 'expired' WHERE id = ?", (row["id"],))
+                status = "pending" if row["status"] == "sending" else "expired"
+                self.conn.execute("UPDATE live_tickets SET status = ? WHERE id = ?", (status, row["id"]))
         self.conn.commit()
 
     def _tickets(self, user_id: str) -> list[TicketView]:
