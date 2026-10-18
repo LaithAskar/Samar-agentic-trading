@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -591,3 +591,36 @@ def test_supabase_bearer_isolates_users(monkeypatch: pytest.MonkeyPatch) -> None
     assert bob.get("/strategies").json() == []
     assert bob.get(f"/backtests/{created.json()['id']}").status_code == 404
     assert TestClient(app).get("/paper").status_code == 401
+
+
+def test_run_once_requires_auth() -> None:
+    client = _client()
+    anon = TestClient(create_app(_state()))
+    assert anon.post("/jobs/run-once").status_code == 401
+    assert client.post("/jobs/run-once").status_code == 200
+
+
+def test_expired_session_token_is_rejected() -> None:
+    state = _state()
+    client = TestClient(create_app(state))
+    r = client.post("/auth/register", json={"email": "demo@example.com", "password": "demo-password-1"})
+    assert r.status_code == 200
+    client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    assert client.get("/auth/me").status_code == 200
+    past = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+    state.conn.execute("UPDATE sessions SET expires_at = ?", (past,))
+    state.conn.commit()
+    assert client.get("/auth/me").status_code == 401
+
+
+def test_concurrent_requests_share_rate_bucket() -> None:
+    state = _state()
+    client = TestClient(create_app(state))
+    r = client.post("/auth/register", json={"email": "demo@example.com", "password": "demo-password-1"})
+    user_id = state.user_from_authorization(f"Bearer {r.json()['token']}").id
+    bucket1 = state.rate_bucket(user_id)
+    bucket2 = state.rate_bucket(user_id)
+    assert bucket1 is bucket2, "same user must get the same bucket across requests"
+    r2 = client.post("/auth/register", json={"email": "other@example.com", "password": "demo-password-2"})
+    user_id2 = state.user_from_authorization(f"Bearer {r2.json()['token']}").id
+    assert state.rate_bucket(user_id2) is not bucket1, "different users must get separate buckets"

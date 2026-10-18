@@ -9,6 +9,7 @@ from typing import Literal, cast
 
 import httpx
 from samar_agent.http_model import ProviderName
+from samar_brokers.limiter import TokenBucket
 from samar_data.market import REAL_DATA, MarketData
 from samar_engine.core.events import Bar
 from samar_engine.dsl import StrategySpec
@@ -50,6 +51,7 @@ from samar_api.live.types import (
 
 KeyReader = Callable[[str, str], str | None]
 Proposer = Callable[[], OrderIntent | None]
+BucketFor = Callable[[str], TokenBucket]
 _OPEN = ("submitted", "open")
 
 
@@ -58,11 +60,19 @@ class PriceDataError(ValueError):
 
 
 class LiveBook:
-    def __init__(self, conn: sqlite3.Connection, http: httpx.Client, read_key: KeyReader, market: MarketData) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        http: httpx.Client,
+        read_key: KeyReader,
+        market: MarketData,
+        bucket_for: BucketFor | None = None,
+    ) -> None:
         self.conn = conn
         self.http = http
         self.read_key = read_key
         self.market = market
+        self._bucket_for = bucket_for
 
     def status(self, user_id: str) -> LiveStatus:
         row = self._settings(user_id)
@@ -111,7 +121,7 @@ class LiveBook:
             raise ValueError("confirmation phrase does not match")
         secret = self._public_secret(user_id)
         try:
-            view = self._orders_client(secret).snapshot()
+            view = self._orders_client(secret, user_id).snapshot()
         except BrokerError as exc:
             raise ValueError("broker error") from exc
         self._remember(user_id, view)
@@ -361,7 +371,7 @@ class LiveBook:
         if not row["enabled"] or row["mode"] != "auto":
             return 0
         secret = self._public_secret(user_id)
-        client = self._orders_client(secret)
+        client = self._orders_client(secret, user_id)
         try:
             view = client.snapshot()
         except BrokerError:
@@ -441,7 +451,7 @@ class LiveBook:
             return None
         symbol = spec.universe[0]
         bars = self._live_bars(symbol, now)
-        quote = self._orders_client(self._public_secret(user_id)).quote(view.account_id, symbol)
+        quote = self._orders_client(self._public_secret(user_id), user_id).quote(view.account_id, symbol)
         held = 0.0
         for position in view.positions:
             if position.symbol.upper() == symbol.upper():
@@ -510,7 +520,7 @@ class LiveBook:
             self.conn.commit()
             return
         secret = self._public_secret(user_id)
-        client = self._orders_client(secret)
+        client = self._orders_client(secret, user_id)
         try:
             view = client.snapshot()
         except BrokerError:
@@ -522,7 +532,7 @@ class LiveBook:
             self.halt(user_id, "unexpected position", now)
             raise ValueError("unexpected position")
         self._mark_pnl(user_id, view.equity, now)
-        ctx = self._context(user_id, now, view, str(ticket["model"]))
+        ctx = self._context(user_id, now, view, str(ticket["model"]), ticket_id)
         intent = OrderIntent(
             symbol=str(ticket["symbol"]),
             side="BUY" if ticket["side"] == "BUY" else "SELL",
@@ -585,7 +595,14 @@ class LiveBook:
         if streak >= REJECT_LIMIT:
             self.halt(user_id, "repeated rejections", now)
 
-    def _context(self, user_id: str, now: datetime, view: AccountState | None, model: str) -> GuardContext:
+    def _context(
+        self,
+        user_id: str,
+        now: datetime,
+        view: AccountState | None,
+        model: str,
+        exclude_ticket_id: str = "",
+    ) -> GuardContext:
         row = self._settings(user_id)
         positions = view.positions if view is not None else tuple(_held_list(str(row["positions_json"] or "[]")))
         buying = view.buying_power if view is not None else float(row["buying_power"] or 0)
@@ -604,7 +621,7 @@ class LiveBook:
             orders_today=self._orders_today(user_id, now),
             orders_last_minute=self._orders_last_minute(user_id, model, now),
             settled_cash=settled,
-            open_buys=self._open_buys(user_id, now),
+            open_buys=self._open_buys(user_id, now, exclude_ticket_id),
             now=now,
             allowlist=ALLOWLIST,
         )
@@ -646,14 +663,24 @@ class LiveBook:
         ).fetchone()
         return int(row["n"]) if row is not None else 0
 
-    def _open_buys(self, user_id: str, now: datetime) -> float:
-        """Buy orders still working today. Orders are DAY orders, so earlier ones have expired or filled."""
+    def _open_buys(self, user_id: str, now: datetime, exclude_ticket_id: str = "") -> float:
+        """Buy orders still working today, plus tickets being sent by concurrent approvals.
+
+        Excluding the current ticket (exclude_ticket_id) prevents double-counting its cost
+        with the notional already checked in evaluate's capital-cap guard.
+        """
         local = now.astimezone(NY)
         start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
         row = self.conn.execute(
-            """SELECT COALESCE(SUM(qty * limit_price), 0) AS total FROM live_orders
-            WHERE user_id = ? AND side = 'BUY' AND status IN ('submitted', 'open') AND created_at >= ?""",
-            (user_id, start.isoformat()),
+            """SELECT
+                COALESCE((SELECT SUM(qty * limit_price) FROM live_orders
+                          WHERE user_id = ? AND side = 'BUY'
+                            AND status IN ('submitted', 'open') AND created_at >= ?), 0.0)
+              + COALESCE((SELECT SUM(qty * limit_price) FROM live_tickets
+                          WHERE user_id = ? AND side = 'BUY'
+                            AND status = 'sending' AND id != ? AND created_at >= ?), 0.0)
+            AS total""",
+            (user_id, start.isoformat(), user_id, exclude_ticket_id, start.isoformat()),
         ).fetchone()
         return float(row["total"]) if row is not None else 0.0
 
@@ -693,7 +720,7 @@ class LiveBook:
             (user_id,),
         ).fetchall()
         secret = self.read_key(user_id, "public_com")
-        client = self._orders_client(secret) if secret and account_id else None
+        client = self._orders_client(secret, user_id) if secret and account_id else None
         for order in orders:
             if client is not None:
                 try:
@@ -732,8 +759,9 @@ class LiveBook:
             raise ValueError("save a Public.com key first")
         return secret
 
-    def _orders_client(self, secret: str) -> PublicOrders:
-        return PublicOrders(secret, self.http)
+    def _orders_client(self, secret: str, user_id: str = "") -> PublicOrders:
+        bucket = self._bucket_for(user_id) if self._bucket_for and user_id else None
+        return PublicOrders(secret, self.http, bucket)
 
     def _expire(self, user_id: str, now: datetime) -> None:
         rows = self.conn.execute(

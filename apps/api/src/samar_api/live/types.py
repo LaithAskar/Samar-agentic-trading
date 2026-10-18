@@ -33,7 +33,7 @@ class OrderIntent(BaseModel):
     side: SideName
     quantity: int
     limit_price: float
-    reason: str
+    reason: str = Field(..., max_length=500)
     model: str = "manual"
     use_margin: bool = False
 
