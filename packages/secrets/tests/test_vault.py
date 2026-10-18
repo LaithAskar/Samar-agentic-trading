@@ -48,3 +48,19 @@ def test_log_filter_redacts_provider_keys() -> None:
     record = logging.LogRecord("t", logging.INFO, __file__, 1, "key " + _demo_key() + " leaked", (), None)
     assert filt.filter(record) is True
     assert record.msg == "key sk-redacted leaked"
+
+
+def test_redaction_covers_all_key_formats() -> None:
+    filt = RedactSecretsFilter()
+    cases = [
+        ("sk-" + "ant-demo1234abcd", "sk-redacted"),
+        ("sk-" + "or-v1-route-key-zzzz", "sk-redacted"),
+        ("sk-" + "nous-abcdefgh", "sk-redacted"),
+        ("sk-" + "A" * 20, "sk-redacted"),
+        ("pub-" + "ABCDEFGHIJKL", "pub-redacted"),
+    ]
+    for raw, expected in cases:
+        msg = f"leaked {raw} here"
+        record = logging.LogRecord("t", logging.INFO, __file__, 1, msg, (), None)
+        assert filt.filter(record) is True
+        assert record.msg == f"leaked {expected} here", f"failed for {raw!r}: got {record.msg!r}"

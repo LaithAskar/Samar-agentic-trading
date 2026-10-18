@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS local_users (
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS arena_runs (
   id TEXT PRIMARY KEY,
@@ -218,6 +219,7 @@ def connect(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate_live_settings(conn)
     _migrate_result_labels(conn)
+    _migrate_sessions(conn)
     return conn
 
 
@@ -259,6 +261,14 @@ def _migrate_result_labels(conn: sqlite3.Connection) -> None:
         "ALTER TABLE arena_runs ADD COLUMN data_label TEXT NOT NULL DEFAULT 'SYNTHETIC DATA'",
     )
     conn.commit()
+
+
+def _migrate_sessions(conn: sqlite3.Connection) -> None:
+    names = {str(row["name"]) for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "expires_at" not in names:
+        conn.execute("ALTER TABLE sessions ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE sessions SET expires_at = datetime(created_at, '+30 days') WHERE expires_at = ''")
+        conn.commit()
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, statement: str) -> None:

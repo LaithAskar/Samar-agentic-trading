@@ -294,6 +294,11 @@ def test_fractional_ticket_is_rejected() -> None:
         OrderIntent(symbol="AAPL", side="BUY", quantity=1.5, limit_price=20, reason="no")  # type: ignore[arg-type]
 
 
+def test_reason_field_is_capped_at_500_chars() -> None:
+    with pytest.raises(ValidationError):
+        OrderIntent(symbol="AAPL", side="BUY", quantity=1, limit_price=20, reason="x" * 501)
+
+
 def test_readonly_key_cannot_enable() -> None:
     script = Script()
     script.permission = None
@@ -860,3 +865,49 @@ def test_one_failing_user_does_not_stop_the_other_cycles() -> None:
     assert any(row.action == "cycle_error" for row in book.audit(broken))
     assert book.status(broken).enabled is False
     assert book.status(broken).halted_reason == "cycle error"
+
+
+def test_concurrent_approves_different_symbols_respect_capital_cap(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent approvals of different symbols that together exceed the cap; total spent must stay within the cap.
+
+    The race: both tickets are set to 'sending' before either calls _open_buys.  Without the fix, both see
+    open_buys=$0 (no submitted orders yet) and both pass the cap check → two orders, $300 spent > $200 cap.
+    With the fix, _open_buys also counts 'sending' tickets from concurrent approvals, so both see the other
+    ticket's $150 and are rejected → zero or one order, total ≤ $200.
+    """
+    script = Script()
+    script.buying_power = "2000.00"
+    script.equity = "2000.00"
+    path = str(tmp_path) + "/live.db"  # type: ignore[operator]
+    _client, state, user_id, book = _session(script, path)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    book.set_limits(user_id, Limits(capital_cap=200, max_order_dollars=200, max_orders_per_day=None), OPEN)
+    aapl = book.propose(
+        user_id,
+        OrderIntent(symbol="AAPL", side="BUY", quantity=10, limit_price=15, reason="concurrent a", model="m"),
+        OPEN,
+    )
+    msft = book.propose(
+        user_id,
+        OrderIntent(symbol="MSFT", side="BUY", quantity=10, limit_price=15, reason="concurrent b", model="m"),
+        OPEN,
+    )
+    second = _state(script, path)
+    other = LiveBook(second.conn, second.http, second.read_key, second.market)
+    real_open_buys = book_module.LiveBook._open_buys  # type: ignore[attr-defined]
+    gate = threading.Barrier(2, timeout=5)
+
+    def paced_open_buys(self_book: LiveBook, *args: object, **kwargs: object) -> float:
+        gate.wait()
+        return real_open_buys(self_book, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(book_module.LiveBook, "_open_buys", paced_open_buys)
+    _race(
+        lambda: book.approve(user_id, aapl.id, OPEN),
+        lambda: other.approve(user_id, msft.id, OPEN),
+    )
+    bodies = [json.loads(body) for body in script.places]
+    spent = sum(int(b["quantity"]) * float(b["limitPrice"]) for b in bodies)
+    assert spent <= 200, f"capital cap exceeded: spent {spent}"

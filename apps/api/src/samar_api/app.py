@@ -251,7 +251,8 @@ def create_app(state: AppState | None = None) -> FastAPI:
             raise HTTPException(404, "arena run not found") from exc
 
     @app.post("/jobs/run-once")
-    def run_once() -> dict[str, int]:
+    def run_once(authorization: str | None = Header(default=None)) -> dict[str, int]:
+        require_user(authorization)
         return {"ran": samar().run_once()}
 
     @app.post("/paper/deploy")
@@ -354,7 +355,7 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     def live_book() -> LiveBook:
         state = samar()
-        return LiveBook(state.conn, state.http, state.read_key, state.market)
+        return LiveBook(state.conn, state.http, state.read_key, state.market, state.rate_bucket)
 
     @app.get("/live/status")
     def live_status(authorization: str | None = Header(default=None)) -> dict[str, object]:

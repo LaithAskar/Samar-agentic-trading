@@ -5,7 +5,7 @@ import os
 import sqlite3
 import sys
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 import httpx
@@ -20,6 +20,7 @@ from samar_agent.http_model import (
     ProviderName,
 )
 from samar_agent.loop import Budget, ChatModel, Proposal, ScriptedModel, run_turn
+from samar_brokers.limiter import TokenBucket
 from samar_brokers.public_readonly import AUTH_URL, GATEWAY, PublicReadOnly
 from samar_contracts.models import (
     ArenaRunView,
@@ -176,6 +177,12 @@ class AppState:
         self.kek = kek
         self.kek_version = 1
         self.http = http or httpx.Client(timeout=30.0)
+        self._rate_buckets: dict[str, TokenBucket] = {}
+
+    def rate_bucket(self, user_id: str) -> TokenBucket:
+        if user_id not in self._rate_buckets:
+            self._rate_buckets[user_id] = TokenBucket()
+        return self._rate_buckets[user_id]
 
     @classmethod
     def open(
@@ -715,9 +722,10 @@ class AppState:
 
     def _issue_session(self, user_id: str) -> str:
         token = new_token()
+        expires_at = (datetime.now(UTC) + timedelta(days=30)).isoformat()
         self.conn.execute(
-            "INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?, ?, ?)",
-            (token_hash(token), user_id, _now()),
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token_hash(token), user_id, _now(), expires_at),
         )
         return token
 
@@ -735,13 +743,16 @@ class AppState:
         if supabase_configured():
             return self._supabase_user(token)
         row = self.conn.execute(
-            """SELECT local_users.id, local_users.email FROM sessions
+            """SELECT local_users.id, local_users.email, sessions.expires_at FROM sessions
             JOIN local_users ON local_users.id = sessions.user_id
             WHERE sessions.token_hash = ?""",
             (token_hash(token),),
         ).fetchone()
         if row is None:
             raise KeyError("missing session")
+        expires_at = str(row["expires_at"] or "")
+        if expires_at and datetime.fromisoformat(expires_at) <= datetime.now(UTC):
+            raise KeyError("session expired")
         return SessionUser(id=str(row["id"]), email=str(row["email"]))
 
     def _supabase_user(self, token: str) -> SessionUser:
