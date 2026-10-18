@@ -349,6 +349,33 @@ def test_place_body_preflight_and_idempotent_retry() -> None:
     assert any(row.detail == "retry reused the order id" for row in book.audit(user_id))
 
 
+@pytest.mark.parametrize("recorded", [False, True])
+def test_cycle_recovers_crashed_sending_ticket(recorded: bool) -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    state.conn.execute("UPDATE live_tickets SET order_id = ? WHERE id = ?", (ORDER_ID, ticket.id))
+    state.conn.commit()
+    if recorded:
+        book.approve(user_id, ticket.id, OPEN)
+    # Persist a crash after the claim, without executing the finally block.
+    state.conn.execute("UPDATE live_tickets SET status = 'sending' WHERE id = ?", (ticket.id,))
+    state.conn.commit()
+    restarted = LiveBook(state.conn, state.http, state.read_key, state.market)
+    restarted.enable_auto(user_id, AUTO_PHRASE, OPEN)
+    assert restarted.run_cycle(user_id, OPEN, None) == 0
+    assert state.conn.execute("SELECT status FROM live_tickets WHERE id = ?", (ticket.id,)).fetchone()[0] == "sending"
+    later = OPEN + timedelta(minutes=6)
+    assert restarted.run_cycle(user_id, later, None) == 0
+    row = state.conn.execute("SELECT status, order_id FROM live_tickets WHERE id = ?", (ticket.id,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["order_id"] == ORDER_ID
+    restarted._send(user_id, ticket.id, later)
+    assert len(script.places) == 1
+    assert json.loads(script.places[0])["orderId"] == ORDER_ID
+
+
 def test_expired_ticket_places_nothing() -> None:
     script = Script()
     _client, _state, user_id, book = _session(script)
@@ -793,6 +820,30 @@ def test_a_second_ticket_for_a_working_order_is_refused() -> None:
     book.propose(user_id, _ok_intent(), OPEN)
     with pytest.raises(ValueError, match="AAPL BUY is already working"):
         book.propose(user_id, _ok_intent(), OPEN)
+
+
+def test_worker_tracks_approve_mode_loss_before_first_approval() -> None:
+    script = Script()
+    _client, state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    # A configured order source must never be invoked by the approve-mode worker.
+    _strategy_on(state, book, user_id)
+    assert book.run_due(OPEN) == 0
+    assert script.places == []
+    assert script.preflights == []
+    assert book.status(user_id).tickets == []
+    assert book.status(user_id).enabled is True
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    script.equity = "190.00"
+    later = OPEN + timedelta(minutes=1)
+    assert book.run_due(later) == 0
+    status = book.status(user_id)
+    assert status.enabled is False
+    assert status.halted_reason == "daily loss stop is hit"
+    with pytest.raises(ValueError, match="live mode is off"):
+        book.approve(user_id, ticket.id, later)
+    assert script.places == []
+    assert script.preflights == []
 
 
 def test_daily_loss_stop_fires_in_approve_each_mode() -> None:
