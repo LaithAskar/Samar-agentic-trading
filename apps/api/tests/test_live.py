@@ -100,6 +100,30 @@ class Script:
         self.model_text = json.dumps(
             {"symbol": "AAPL", "side": "BUY", "quantity": 1, "limit_price": 20, "reason": "test ticket"}
         )
+        self.order_at_broker: str | None = None
+        self.order_lookup_status: int | None = None
+
+    def _order_lookup(self, url: str) -> httpx.Response:
+        order_id = url.rsplit("/", 1)[-1]
+        if self.order_lookup_status is not None:
+            return httpx.Response(self.order_lookup_status, json={"message": "forced"})
+        placed_ids = {json.loads(body).get("orderId") for _, u, body in self.calls if u.endswith("/order")}
+        if order_id in placed_ids or order_id == self.order_at_broker:
+            return httpx.Response(200, json={"orderId": order_id, "orderStatus": "OPEN"})
+        return httpx.Response(404, json={"message": "not found"})
+
+    def _place_order(self, request: httpx.Request) -> httpx.Response:
+        placed = [call for call in self.calls if call[0] == "POST" and call[1].endswith("/order")]
+        status = self.place_status if len(placed) <= self.place_limit else 200
+        if status != 200:
+            return httpx.Response(status, json={"message": "rejected"})
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"orderId": body["orderId"]})
+
+    def _chat(self, url: str) -> httpx.Response:
+        if "api.anthropic.com" in url or url.endswith("/messages"):
+            return httpx.Response(200, json={"content": [{"type": "text", "text": self.model_text}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": self.model_text}}]})
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append((request.method, str(request.url), request.content))
@@ -115,31 +139,19 @@ class Script:
             buying: object = self.buying_power
             if self.cash_only is not None:
                 buying = {"buyingPower": self.buying_power, "cashOnlyBuyingPower": self.cash_only}
-            return httpx.Response(
-                200,
-                json={
-                    "buyingPower": buying,
-                    "equity": self.equity,
-                    "positions": self.positions,
-                },
-            )
+            return httpx.Response(200, json={"buyingPower": buying, "equity": self.equity, "positions": self.positions})
         if url.endswith("/quotes"):
             return httpx.Response(200, json={"quotes": [{"symbol": "AAPL", "last": self.quote}]})
         if url.endswith("/preflight/single-leg"):
             return httpx.Response(200, json={"estimatedCost": "20.00"})
         if request.method == "DELETE" and "/order/" in url:
             return httpx.Response(200, json={"orderId": url.rsplit("/", 1)[-1]})
+        if request.method == "GET" and "/order/" in url:
+            return self._order_lookup(url)
         if request.method == "POST" and url.endswith("/order"):
-            placed = [call for call in self.calls if call[0] == "POST" and call[1].endswith("/order")]
-            status = self.place_status if len(placed) <= self.place_limit else 200
-            if status != 200:
-                return httpx.Response(status, json={"message": "rejected"})
-            body = json.loads(request.content)
-            return httpx.Response(200, json={"orderId": body["orderId"]})
+            return self._place_order(request)
         if "chat/completions" in url or url.endswith("/messages"):
-            if "api.anthropic.com" in url or url.endswith("/messages"):
-                return httpx.Response(200, json={"content": [{"type": "text", "text": self.model_text}]})
-            return httpx.Response(200, json={"choices": [{"message": {"content": self.model_text}}]})
+            return self._chat(url)
         return httpx.Response(500, json={"message": "unexpected"})
 
     @property
@@ -369,11 +381,15 @@ def test_cycle_recovers_crashed_sending_ticket(recorded: bool) -> None:
     later = OPEN + timedelta(minutes=6)
     assert restarted.run_cycle(user_id, later, None) == 0
     row = state.conn.execute("SELECT status, order_id FROM live_tickets WHERE id = ?", (ticket.id,)).fetchone()
-    assert row["status"] == "pending"
     assert row["order_id"] == ORDER_ID
-    restarted._send(user_id, ticket.id, later)
-    assert len(script.places) == 1
-    assert json.loads(script.places[0])["orderId"] == ORDER_ID
+    if recorded:
+        assert row["status"] == "sent"
+        assert len(script.places) == 1
+    else:
+        assert row["status"] == "pending"
+        restarted._send(user_id, ticket.id, later)
+        assert len(script.places) == 1
+        assert json.loads(script.places[0])["orderId"] == ORDER_ID
 
 
 def test_expired_ticket_places_nothing() -> None:
@@ -962,3 +978,86 @@ def test_concurrent_approves_different_symbols_respect_capital_cap(
     bodies = [json.loads(body) for body in script.places]
     spent = sum(int(b["quantity"]) * float(b["limitPrice"]) for b in bodies)
     assert spent <= 200, f"capital cap exceeded: spent {spent}"
+
+
+def test_naive_session_expires_at_does_not_crash_auth() -> None:
+    script = Script()
+    client, state, _user_id, _book = _session(script)
+    state.conn.execute("UPDATE sessions SET expires_at = '2099-12-31 12:00:00'")
+    state.conn.commit()
+    resp = client.get("/live/status")
+    assert resp.status_code == 200
+
+
+def test_expired_naive_session_is_rejected() -> None:
+    script = Script()
+    client, state, _user_id, _book = _session(script)
+    state.conn.execute("UPDATE sessions SET expires_at = '2000-01-01 00:00:00'")
+    state.conn.commit()
+    resp = client.get("/live/status")
+    assert resp.status_code in (401, 403)
+
+
+def test_rate_bucket_shared_across_concurrent_calls() -> None:
+    script = Script()
+    _client, state, user_id, _book = _session(script)
+    results: list[object] = []
+    barrier = threading.Barrier(4)
+
+    def get_bucket() -> None:
+        barrier.wait()
+        results.append(state.rate_bucket(user_id))
+
+    threads = [threading.Thread(target=get_bucket) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(id(b) for b in results)) == 1
+
+
+def test_run_live_cycles_passes_bucket_to_livebook(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[object] = []
+    original_init = book_module.LiveBook.__init__
+
+    def capturing_init(self: object, *args: object, **kwargs: object) -> None:
+        captured.append(args[4] if len(args) > 4 else kwargs.get("bucket_for"))
+        original_init(self, *args, **kwargs)  # type: ignore[misc]
+
+    monkeypatch.setattr(book_module.LiveBook, "__init__", capturing_init)
+    script = Script()
+    _client, state, _user_id, _book = _session(script)
+    state.run_live_cycles(OPEN)
+    assert any(c is not None for c in captured)
+
+
+def test_crash_between_place_and_record_reconciles_without_double_send() -> None:
+    script = Script()
+    script.order_at_broker = ORDER_ID
+    _client, state, user_id, book = _session(script)
+    book.enable(user_id, ENABLE_PHRASE, OPEN)
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    state.conn.execute("UPDATE live_tickets SET order_id = ?, status = 'sending' WHERE id = ?", (ORDER_ID, ticket.id))
+    state.conn.commit()
+    restarted = LiveBook(state.conn, state.http, state.read_key, state.market)
+    restarted.enable_auto(user_id, AUTO_PHRASE, OPEN)
+    later = OPEN + timedelta(minutes=6)
+    restarted.run_cycle(user_id, later, None)
+    row = state.conn.execute("SELECT status FROM live_tickets WHERE id = ?", (ticket.id,)).fetchone()
+    assert row["status"] == "sent"
+    assert script.places == []
+
+
+def test_crash_recovery_broker_error_leaves_ticket_in_sending() -> None:
+    script = Script()
+    script.order_lookup_status = 500
+    _client, state, user_id, book = _session(script)
+    _arm(book, user_id)
+    ticket = book.propose(user_id, _ok_intent(), OPEN)
+    state.conn.execute("UPDATE live_tickets SET order_id = ?, status = 'sending' WHERE id = ?", (ORDER_ID, ticket.id))
+    state.conn.commit()
+    restarted = LiveBook(state.conn, state.http, state.read_key, state.market)
+    later = OPEN + timedelta(minutes=6)
+    restarted.run_cycle(user_id, later, None)
+    status = state.conn.execute("SELECT status FROM live_tickets WHERE id = ?", (ticket.id,)).fetchone()[0]
+    assert status == "sending"

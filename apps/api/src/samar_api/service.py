@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -178,11 +179,13 @@ class AppState:
         self.kek_version = 1
         self.http = http or httpx.Client(timeout=30.0)
         self._rate_buckets: dict[str, TokenBucket] = {}
+        self._rate_lock = threading.Lock()
 
     def rate_bucket(self, user_id: str) -> TokenBucket:
-        if user_id not in self._rate_buckets:
-            self._rate_buckets[user_id] = TokenBucket()
-        return self._rate_buckets[user_id]
+        with self._rate_lock:
+            if user_id not in self._rate_buckets:
+                self._rate_buckets[user_id] = TokenBucket()
+            return self._rate_buckets[user_id]
 
     @classmethod
     def open(
@@ -751,8 +754,12 @@ class AppState:
         if row is None:
             raise KeyError("missing session")
         expires_at = str(row["expires_at"] or "")
-        if expires_at and datetime.fromisoformat(expires_at) <= datetime.now(UTC):
-            raise KeyError("session expired")
+        if expires_at:
+            parsed = datetime.fromisoformat(expires_at)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            if parsed <= datetime.now(UTC):
+                raise KeyError("session expired")
         return SessionUser(id=str(row["id"]), email=str(row["email"]))
 
     def _supabase_user(self, token: str) -> SessionUser:
@@ -939,7 +946,7 @@ class AppState:
         return view
 
     def run_live_cycles(self, now: datetime) -> int:
-        return LiveBook(self.conn, self.http, self.read_key, self.market).run_due(now)
+        return LiveBook(self.conn, self.http, self.read_key, self.market, self.rate_bucket).run_due(now)
 
     def broker_snapshot(self, user_id: str) -> BrokerSnapshotView | None:
         row = self.conn.execute(

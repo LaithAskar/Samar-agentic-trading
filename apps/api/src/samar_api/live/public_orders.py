@@ -145,6 +145,18 @@ class PublicOrders:
         self._ensure_token()
         self._send("DELETE", f"{self._gateway}/trading/{account_id}/order/{order_id}")
 
+    def get_order(self, account_id: str, order_id: str) -> str | None:
+        self._ensure_token()
+        try:
+            response = self._send("GET", f"{self._gateway}/trading/{account_id}/order/{order_id}")
+        except BrokerError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        body = _object(response.json())
+        status = body.get("orderStatus") or body.get("status")
+        return str(status) if isinstance(status, str) and status else "unknown"
+
     def _ensure_token(self) -> None:
         if self._token is not None:
             return
