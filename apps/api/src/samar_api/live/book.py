@@ -379,6 +379,7 @@ class LiveBook:
             self.halt(user_id, "broker error", now)
             return 0
         self._remember(user_id, view)
+        self._reconcile_sending(user_id, view.account_id, client, now)
         if view.permission != "trade":
             self.halt(user_id, "this Public key cannot trade", now)
             return 0
@@ -768,13 +769,59 @@ class LiveBook:
 
     def _expire(self, user_id: str, now: datetime) -> None:
         rows = self.conn.execute(
-            "SELECT id, status, expires_at FROM live_tickets WHERE user_id = ? AND status IN ('pending', 'sending')",
+            "SELECT id, expires_at FROM live_tickets WHERE user_id = ? AND status = 'pending'",
             (user_id,),
         ).fetchall()
         for row in rows:
             if _parse(str(row["expires_at"])) <= now:
-                status = "pending" if row["status"] == "sending" else "expired"
-                self.conn.execute("UPDATE live_tickets SET status = ? WHERE id = ?", (status, row["id"]))
+                self.conn.execute("UPDATE live_tickets SET status = 'expired' WHERE id = ?", (row["id"],))
+        self.conn.commit()
+
+    def _reconcile_sending(self, user_id: str, account_id: str, client: PublicOrders, now: datetime) -> None:
+        rows = self.conn.execute(
+            "SELECT id, order_id, expires_at, symbol, side, qty, limit_price FROM live_tickets "
+            "WHERE user_id = ? AND status = 'sending'",
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            if _parse(str(row["expires_at"])) > now:
+                continue
+            ticket_id = str(row["id"])
+            order_id = str(row["order_id"] or "")
+            if not order_id:
+                self.conn.execute("UPDATE live_tickets SET status = 'pending' WHERE id = ?", (ticket_id,))
+                self._audit(user_id, "recover", "no order_id; reset to pending", now)
+                continue
+            existing = self.conn.execute("SELECT id FROM live_orders WHERE id = ?", (order_id,)).fetchone()
+            if existing is not None:
+                self.conn.execute("UPDATE live_tickets SET status = 'sent' WHERE id = ?", (ticket_id,))
+                self._audit(user_id, "recover", "found in local orders", now)
+                continue
+            try:
+                broker_status = client.get_order(account_id, order_id)
+            except BrokerError:
+                continue
+            if broker_status is None:
+                self.conn.execute("UPDATE live_tickets SET status = 'pending' WHERE id = ?", (ticket_id,))
+                self._audit(user_id, "recover", "not at broker; reset to pending", now)
+            else:
+                self.conn.execute(
+                    """INSERT INTO live_orders
+                    (id, user_id, ticket_id, symbol, side, qty, limit_price, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', ?)""",
+                    (
+                        order_id,
+                        user_id,
+                        ticket_id,
+                        str(row["symbol"]),
+                        str(row["side"]),
+                        int(row["qty"]),
+                        float(row["limit_price"]),
+                        now.isoformat(),
+                    ),
+                )
+                self.conn.execute("UPDATE live_tickets SET status = 'sent' WHERE id = ?", (ticket_id,))
+                self._audit(user_id, "recover", f"found at broker: {order_id}", now)
         self.conn.commit()
 
     def _tickets(self, user_id: str) -> list[TicketView]:

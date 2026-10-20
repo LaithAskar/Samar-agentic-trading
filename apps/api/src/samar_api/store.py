@@ -267,7 +267,11 @@ def _migrate_sessions(conn: sqlite3.Connection) -> None:
     names = {str(row["name"]) for row in conn.execute("PRAGMA table_info(sessions)")}
     if "expires_at" not in names:
         conn.execute("ALTER TABLE sessions ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
-        conn.execute("UPDATE sessions SET expires_at = datetime(created_at, '+30 days') WHERE expires_at = ''")
+        conn.execute(
+            "UPDATE sessions SET expires_at = "
+            "strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '+30 days') "
+            "WHERE expires_at = ''"
+        )
         conn.commit()
 
 
